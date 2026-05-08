@@ -7,17 +7,14 @@ struct AgentTabStrip: View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 5) {
                 ForEach(visibleFilters) { filter in
-                    Button {
+                    AgentTab(
+                        filter: filter,
+                        cost: cost(for: filter),
+                        isActive: store.selectedProvider == filter,
+                        quota: store.quotaSummary(for: filter)
+                    ) {
                         store.switchTo(provider: filter)
-                    } label: {
-                        AgentTab(
-                            filter: filter,
-                            cost: cost(for: filter),
-                            isActive: store.selectedProvider == filter,
-                            quota: store.quotaSummary(for: filter)
-                        )
                     }
-                    .buttonStyle(.plain)
                 }
             }
             .padding(.horizontal, 12)
@@ -65,10 +62,12 @@ private struct AgentTab: View {
     let cost: Double?
     let isActive: Bool
     let quota: QuotaSummary?
+    let onTap: () -> Void
 
     @State private var hoverPopoverShown = false
     @State private var hoverEnterTask: DispatchWorkItem?
     @State private var hoverExitTask: DispatchWorkItem?
+    @State private var clickDismissed = false
 
     /// Providers whose AgentTab chip reserves a 3pt bar slot underneath the
     /// label, even when not yet connected. Driven by which providers we
@@ -93,16 +92,9 @@ private struct AgentTab: View {
                         .tracking(-0.2)
                 }
             }
-            // Reserve the bar slot only for providers whose quota source we
-            // implement (Claude, Codex). Providers that will never have a bar
-            // (All / Cursor / Droid / Gemini / Copilot) skip the slot entirely
-            // so the text centers naturally and the chip stays compact.
-            // Reserving the slot for Claude/Codex prevents the strip from
-            // jumping by 6pt the moment the user clicks Connect.
-            if Self.providerSupportsQuota(filter) {
+            if quota != nil {
                 AgentTabQuotaBar(quota: quota, isActive: isActive)
                     .frame(height: 3)
-                    .opacity(quota == nil ? 0 : 1)
             }
         }
         .padding(.horizontal, 10)
@@ -113,20 +105,24 @@ private struct AgentTab: View {
         )
         .foregroundStyle(isActive ? AnyShapeStyle(.white) : AnyShapeStyle(.secondary))
         .contentShape(Rectangle())
+        .onTapGesture {
+            hoverPopoverShown = false
+            hoverEnterTask?.cancel()
+            clickDismissed = true
+            onTap()
+        }
         .onHover { hovering in
-            // Debounce: 250ms enter so swiping across chips doesn't pop a
-            // popover for every chip touched, and 150ms exit so cursor travel
-            // between chip and popover doesn't dismiss prematurely.
             hoverEnterTask?.cancel()
             hoverExitTask?.cancel()
-            if hovering, quota != nil {
-                let task = DispatchWorkItem { hoverPopoverShown = true }
-                hoverEnterTask = task
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: task)
-            } else {
+            if !hovering {
+                clickDismissed = false
                 let task = DispatchWorkItem { hoverPopoverShown = false }
                 hoverExitTask = task
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: task)
+            } else if !clickDismissed, quota != nil {
+                let task = DispatchWorkItem { hoverPopoverShown = true }
+                hoverEnterTask = task
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: task)
             }
         }
         .popover(isPresented: $hoverPopoverShown) {

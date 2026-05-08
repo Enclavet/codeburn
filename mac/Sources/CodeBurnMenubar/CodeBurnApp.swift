@@ -35,6 +35,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private var backgroundActivity: NSObjectProtocol?
     private var pendingRefreshWork: DispatchWorkItem?
     private var refreshLoopTask: Task<Void, Never>?
+    private var forceRefreshTask: Task<Void, Never>?
 
     func applicationWillFinishLaunching(_ notification: Notification) {
         // Set accessory policy before the app's focus chain forms. On macOS Tahoe
@@ -87,6 +88,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             queue: .main
         ) { [weak self] _ in
             Task { @MainActor in
+                self?.forceRefreshTask?.cancel()
+                self?.forceRefreshTask = nil
                 self?.refreshLoopTask?.cancel()
                 self?.refreshLoopTask = nil
             }
@@ -102,6 +105,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             queue: .main
         ) { [weak self] _ in
             Task { @MainActor in
+                self?.store.resetLoadingState()
                 self?.forceRefresh()
                 if self?.refreshLoopTask == nil { self?.startRefreshLoop() }
             }
@@ -209,17 +213,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         guard now.timeIntervalSince(lastRefreshTime) > 5 else { return }
         lastRefreshTime = now
 
-        // Note: do NOT call store.invalidateCache() here. The day-rollover guard
-        // inside refresh() already wipes the cache when the calendar date has
-        // changed; wiping unconditionally on every wake/manual-refresh empties
-        // todayPayload, makes showAgentTabs go false, and triggers the
-        // full-popover loading overlay (because cache[key] == nil after wipe).
-        // That's the regression chain documented in the multi-agent review.
-        //
-        // showLoading: true is fine now that the overlay condition is
-        // `!hasCachedData`: it lights up the refresh-button spinner glyph
-        // without covering the popover body.
-        Task {
+        forceRefreshTask?.cancel()
+        forceRefreshTask = Task {
             async let main: Void = store.refresh(includeOptimize: false, force: true, showLoading: true)
             async let today: Void = store.refreshQuietly(period: .today)
             _ = await (main, today)

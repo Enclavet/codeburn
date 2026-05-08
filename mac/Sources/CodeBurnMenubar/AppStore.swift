@@ -118,6 +118,11 @@ final class AppStore {
 
     private var inFlightKeys: Set<PayloadCacheKey> = []
 
+    func resetLoadingState() {
+        loadingCount = 0
+        inFlightKeys.removeAll()
+    }
+
     private func invalidateStaleDayCache() {
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyy-MM-dd"
