@@ -96,7 +96,7 @@ codesign --verify --deep --strict "${BUNDLE}" 2>/dev/null || echo "  (signature 
 ZIP_NAME="CodeBurnMenubar-${VERSION}.zip"
 ZIP_PATH="${DIST_DIR}/${ZIP_NAME}"
 echo "▸ Packaging ${ZIP_NAME}..."
-(cd "${DIST_DIR}" && /usr/bin/ditto -c -k --keepParent "${BUNDLE_NAME}" "${ZIP_NAME}")
+(cd "${DIST_DIR}" && COPYFILE_DISABLE=1 /usr/bin/ditto -c -k --norsrc --keepParent "${BUNDLE_NAME}" "${ZIP_NAME}")
 
 CHECKSUM_NAME="${ZIP_NAME}.sha256"
 CHECKSUM_PATH="${DIST_DIR}/${CHECKSUM_NAME}"

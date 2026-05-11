@@ -182,7 +182,7 @@ export async function installMenubarApp(options: { force?: boolean } = {}): Prom
     }
 
     console.log('Unpacking...')
-    await runCommand('/usr/bin/unzip', ['-q', archivePath, '-d', stagingDir])
+    await runCommand('/usr/bin/ditto', ['-x', '-k', archivePath, stagingDir])
 
     const unpackedApp = join(stagingDir, APP_BUNDLE_NAME)
     if (!(await exists(unpackedApp))) {
