@@ -2,6 +2,7 @@ import { readFile, writeFile, mkdir, rename } from 'fs/promises'
 import { join } from 'path'
 import { homedir } from 'os'
 import { randomBytes } from 'crypto'
+import { PLAN_PROVIDERS } from './plans.js'
 
 export type PlanId = 'claude-pro' | 'claude-max' | 'claude-max-5x' | 'cursor-pro' | 'custom' | 'none'
 export type PlanProvider = 'claude' | 'codex' | 'cursor' | 'all'
@@ -14,12 +15,17 @@ export type Plan = {
   setAt: string
 }
 
+export type PlanConfig = Omit<Plan, 'provider' | 'setAt'> & Partial<Pick<Plan, 'provider' | 'setAt'>>
+export type PlanConfigMap = Partial<Record<PlanProvider, PlanConfig>>
+export type PlanMap = Partial<Record<PlanProvider, Plan>>
+
 export type CodeburnConfig = {
   currency?: {
     code: string
     symbol?: string
   }
   plan?: Plan
+  plans?: PlanConfigMap
   modelAliases?: Record<string, string>
 }
 
@@ -53,19 +59,79 @@ export async function saveConfig(config: CodeburnConfig): Promise<void> {
 }
 
 export async function readPlan(): Promise<Plan | undefined> {
-  const config = await readConfig()
-  return config.plan
+  const plans = await readPlans()
+  for (const provider of PLAN_PROVIDERS) {
+    const plan = plans[provider]
+    if (plan) return plan
+  }
+  return undefined
+}
+
+function planFromConfig(provider: PlanProvider, plan: PlanConfig | undefined): Plan | undefined {
+  if (!plan) return undefined
+  return {
+    ...plan,
+    provider,
+    setAt: plan.setAt ?? '',
+  }
+}
+
+function normalizePlans(config: CodeburnConfig): PlanMap {
+  const plans: PlanMap = {}
+
+  if (config.plans && Object.keys(config.plans).length > 0) {
+    for (const provider of PLAN_PROVIDERS) {
+      const plan = planFromConfig(provider, config.plans[provider])
+      if (plan) plans[provider] = plan
+    }
+    if (plans.all && PLAN_PROVIDERS.some(provider => provider !== 'all' && plans[provider])) {
+      delete plans.all
+    }
+    return plans
+  }
+
+  if (config.plan) {
+    plans[config.plan.provider] = config.plan
+  }
+
+  return plans
+}
+
+export async function readPlans(): Promise<PlanMap> {
+  return normalizePlans(await readConfig())
 }
 
 export async function savePlan(plan: Plan): Promise<void> {
   const config = await readConfig()
-  config.plan = plan
+  const plans = normalizePlans(config)
+  if (plan.provider === 'all') {
+    config.plans = { all: plan }
+  } else {
+    delete plans.all
+    plans[plan.provider] = plan
+    config.plans = plans
+  }
+  delete config.plan
   await saveConfig(config)
 }
 
-export async function clearPlan(): Promise<void> {
+export async function clearPlan(provider?: PlanProvider): Promise<void> {
   const config = await readConfig()
+  if (provider) {
+    const plans = normalizePlans(config)
+    delete plans[provider]
+    if (Object.keys(plans).length > 0) {
+      config.plans = plans
+    } else {
+      delete config.plans
+    }
+    delete config.plan
+    await saveConfig(config)
+    return
+  }
+
   delete config.plan
+  delete config.plans
   await saveConfig(config)
 }
 

@@ -255,13 +255,14 @@ Requires a git repository. Run from your project directory.
 codeburn plan set claude-max                                  # $200/month
 codeburn plan set claude-pro                                  # $20/month
 codeburn plan set cursor-pro                                  # $20/month
-codeburn plan set custom --monthly-usd 150 --provider claude  # custom
+codeburn plan set custom --monthly-usd 200 --provider codex   # ChatGPT Pro-style custom plan
+codeburn plan reset --provider codex                          # remove one provider plan
 codeburn plan set none                                        # disable plan view
-codeburn plan                                                 # show current
+codeburn plan                                                 # show configured plans
 codeburn plan reset                                           # remove plan config
 ```
 
-Subscription tracking for Claude Pro, Claude Max, and Cursor Pro. The dashboard shows a progress bar of API-equivalent cost against your plan price. Supports custom plans. Presets use publicly stated plan prices (as of April 2026); they do not model exact token allowances, because vendors do not publish precise consumer-plan limits.
+Subscription tracking for Claude Pro, Claude Max, Cursor Pro, and custom provider plans. Plans are stored per provider, so you can track Claude and Codex/Cursor subscriptions at the same time; the dashboard shows one overage line per active provider plan. A legacy/custom `all` plan remains a single aggregate plan and is replaced when you add a provider-specific plan, avoiding double-counted overage rows. Existing single-plan config is still read as a fallback. Presets use publicly stated plan prices (as of April 2026); they do not model exact token allowances, because vendors do not publish precise consumer-plan limits.
 
 ### Currency
 

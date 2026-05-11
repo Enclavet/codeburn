@@ -12,7 +12,7 @@ import { scanAndDetect, type WasteFinding, type WasteAction, type OptimizeResult
 import { estimateContextBudget, discoverProjectCwd, type ContextBudget } from './context-budget.js'
 import { dateKey } from './day-aggregator.js'
 import { CompareView } from './compare.js'
-import { getPlanUsageOrNull, type PlanUsage } from './plan-usage.js'
+import { getPlanUsages, type PlanUsage } from './plan-usage.js'
 import { planDisplayName } from './plans.js'
 import { getDateRange, PERIODS, PERIOD_LABELS, type Period, formatDateRangeLabel } from './cli-date.js'
 import { join } from 'path'
@@ -153,7 +153,30 @@ function renderPlanBar(percentUsed: number, width: number): string {
   return `${'▓'.repeat(width)}${'▶'.repeat(chevrons)}`
 }
 
-function Overview({ projects, label, width, planUsage }: { projects: ProjectSummary[]; label: string; width: number; planUsage?: PlanUsage }) {
+function planLabel(planUsage: PlanUsage): string {
+  const name = planDisplayName(planUsage.plan.id)
+  return planUsage.plan.id === 'custom' ? `${name} (${planUsage.plan.provider})` : name
+}
+
+function planColor(planUsage: PlanUsage): string {
+  return planUsage.status === 'over'
+    ? '#F55B5B'
+    : planUsage.status === 'near'
+      ? ORANGE
+      : '#5BF58C'
+}
+
+function planStatusText(planUsage: PlanUsage): string {
+  if (planUsage.status === 'under') {
+    return `Well within plan. Projected month: ${formatCost(planUsage.projectedMonthUsd)} (reset in ${planUsage.daysUntilReset} days).`
+  }
+  if (planUsage.status === 'near') {
+    return `Approaching plan limit. Projected month: ${formatCost(planUsage.projectedMonthUsd)} (reset in ${planUsage.daysUntilReset} days).`
+  }
+  return `${(planUsage.spentApiEquivalentUsd / Math.max(planUsage.budgetUsd, 1)).toFixed(1)}x your subscription value. Projected month: ${formatCost(planUsage.projectedMonthUsd)} (reset in ${planUsage.daysUntilReset} days).`
+}
+
+function Overview({ projects, label, width, planUsages }: { projects: ProjectSummary[]; label: string; width: number; planUsages?: PlanUsage[] }) {
   const totalCost = projects.reduce((s, p) => s + p.totalCostUSD, 0)
   const totalCalls = projects.reduce((s, p) => s + p.totalApiCalls, 0)
   const totalSessions = projects.reduce((s, p) => s + p.sessions.length, 0)
@@ -165,15 +188,7 @@ function Overview({ projects, label, width, planUsage }: { projects: ProjectSumm
   const allInputTokens = totalInput + totalCacheRead + totalCacheWrite
   const cacheHit = allInputTokens > 0
     ? (totalCacheRead / allInputTokens) * 100 : 0
-  const planLabel = planUsage ? `${planDisplayName(planUsage.plan.id)}: ${formatCost(planUsage.spentApiEquivalentUsd)} API-equivalent vs ${formatCost(planUsage.budgetUsd)} plan` : ''
-  const planPct = planUsage ? `${planUsage.percentUsed.toFixed(1)}%` : ''
-  const planColor = planUsage
-    ? planUsage.status === 'over'
-      ? '#F55B5B'
-      : planUsage.status === 'near'
-        ? ORANGE
-        : '#5BF58C'
-    : DIM
+  const activePlanUsages = planUsages ?? []
 
   return (
     <Box flexDirection="column" borderStyle="round" borderColor={PANEL_COLORS.overview} paddingX={1} width={width}>
@@ -194,22 +209,23 @@ function Overview({ projects, label, width, planUsage }: { projects: ProjectSumm
       <Text dimColor wrap="truncate-end">
         {formatTokens(totalInput)} in   {formatTokens(totalOutput)} out   {formatTokens(totalCacheRead)} cached   {formatTokens(totalCacheWrite)} written
       </Text>
-      {planUsage && (
+      {activePlanUsages.length > 0 && (
         <>
-          <Text wrap="truncate-end">
-            <Text color={planColor}>{planLabel}</Text>
-            <Text>  </Text>
-            <Text color={planColor}>{renderPlanBar(planUsage.percentUsed, PLAN_BAR_WIDTH)}</Text>
-            <Text> </Text>
-            <Text bold color={planColor}>{planPct}</Text>
-          </Text>
-          <Text dimColor wrap="truncate-end">
-            {planUsage.status === 'under'
-              ? `Well within plan. Projected month: ${formatCost(planUsage.projectedMonthUsd)} (reset in ${planUsage.daysUntilReset} days).`
-              : planUsage.status === 'near'
-                ? `Approaching plan limit. Projected month: ${formatCost(planUsage.projectedMonthUsd)} (reset in ${planUsage.daysUntilReset} days).`
-                : `${(planUsage.spentApiEquivalentUsd / Math.max(planUsage.budgetUsd, 1)).toFixed(1)}x your subscription value. Projected month: ${formatCost(planUsage.projectedMonthUsd)} (reset in ${planUsage.daysUntilReset} days).`}
-          </Text>
+          {activePlanUsages.map(planUsage => {
+            const color = planColor(planUsage)
+            return (
+              <React.Fragment key={planUsage.plan.provider}>
+                <Text wrap="truncate-end">
+                  <Text color={color}>{planLabel(planUsage)}: {formatCost(planUsage.spentApiEquivalentUsd)} API-equivalent vs {formatCost(planUsage.budgetUsd)} plan</Text>
+                  <Text>  </Text>
+                  <Text color={color}>{renderPlanBar(planUsage.percentUsed, PLAN_BAR_WIDTH)}</Text>
+                  <Text> </Text>
+                  <Text bold color={color}>{planUsage.percentUsed.toFixed(1)}%</Text>
+                </Text>
+                <Text dimColor wrap="truncate-end">{planStatusText(planUsage)}</Text>
+              </React.Fragment>
+            )
+          })}
         </>
       )}
     </Box>
@@ -671,7 +687,7 @@ function Row({ wide, width, children }: { wide: boolean; width: number; children
   return <>{children}</>
 }
 
-function DashboardContent({ projects, period, columns, activeProvider, budgets, planUsage }: { projects: ProjectSummary[]; period: Period; columns?: number; activeProvider?: string; budgets?: Map<string, ContextBudget>; planUsage?: PlanUsage }) {
+function DashboardContent({ projects, period, columns, activeProvider, budgets, planUsages }: { projects: ProjectSummary[]; period: Period; columns?: number; activeProvider?: string; budgets?: Map<string, ContextBudget>; planUsages?: PlanUsage[] }) {
   const { dashWidth, wide, halfWidth, barWidth } = getLayout(columns)
   const isCursor = activeProvider === 'cursor'
   if (projects.length === 0) return <Panel title="CodeBurn" color={ORANGE} width={dashWidth}><Text dimColor>No usage data found for {PERIOD_LABELS[period]}.</Text></Panel>
@@ -679,7 +695,7 @@ function DashboardContent({ projects, period, columns, activeProvider, budgets, 
   const days = period === 'all' ? undefined : (period === 'month' || period === '30days' ? 31 : 14)
   return (
     <Box flexDirection="column" width={dashWidth}>
-      <Overview projects={projects} label={PERIOD_LABELS[period]} width={dashWidth} planUsage={planUsage} />
+      <Overview projects={projects} label={PERIOD_LABELS[period]} width={dashWidth} planUsages={planUsages} />
       <Row wide={wide} width={dashWidth}><DailyActivity projects={projects} days={days} pw={pw} bw={barWidth} /><ProjectBreakdown projects={projects} pw={pw} bw={barWidth} budgets={budgets} /></Row>
       <TopSessions projects={projects} pw={dashWidth} bw={barWidth} />
       <Row wide={wide} width={dashWidth}><ActivityBreakdown projects={projects} pw={pw} bw={barWidth} /><ModelBreakdown projects={projects} pw={pw} bw={barWidth} /></Row>
@@ -692,11 +708,11 @@ function DashboardContent({ projects, period, columns, activeProvider, budgets, 
   )
 }
 
-function InteractiveDashboard({ initialProjects, initialPeriod, initialProvider, initialPlanUsage, refreshSeconds, projectFilter, excludeFilter, customRange, customRangeLabel }: {
+function InteractiveDashboard({ initialProjects, initialPeriod, initialProvider, initialPlanUsages, refreshSeconds, projectFilter, excludeFilter, customRange, customRangeLabel }: {
   initialProjects: ProjectSummary[]
   initialPeriod: Period
   initialProvider: string
-  initialPlanUsage?: PlanUsage
+  initialPlanUsages?: PlanUsage[]
   refreshSeconds?: number
   projectFilter?: string[]
   excludeFilter?: string[]
@@ -712,7 +728,7 @@ function InteractiveDashboard({ initialProjects, initialPeriod, initialProvider,
   const [view, setView] = useState<View>('dashboard')
   const [optimizeResult, setOptimizeResult] = useState<OptimizeResult | null>(null)
   const [projectBudgets, setProjectBudgets] = useState<Map<string, ContextBudget>>(new Map())
-  const [planUsage, setPlanUsage] = useState<PlanUsage | undefined>(initialPlanUsage)
+  const [planUsages, setPlanUsages] = useState<PlanUsage[]>(initialPlanUsages ?? [])
   // Cursor for the OptimizeView's findings window. Reset whenever the user
   // leaves the optimize view OR the underlying findings change so a long
   // findings list never strands the user past the new array length.
@@ -783,9 +799,9 @@ function InteractiveDashboard({ initialProjects, initialPeriod, initialProvider,
       if (reloadGenerationRef.current !== generation) return
 
       setProjects(filteredProjects)
-      const usage = await getPlanUsageOrNull()
+      const usage = await getPlanUsages()
       if (reloadGenerationRef.current !== generation) return
-      setPlanUsage(usage ?? undefined)
+      setPlanUsages(usage)
     } catch (error) {
       console.error(error)
     } finally {
@@ -891,7 +907,7 @@ function InteractiveDashboard({ initialProjects, initialPeriod, initialProvider,
         ? <CompareView projects={projects} onBack={() => setView('dashboard')} />
         : view === 'optimize' && optimizeResult
           ? <OptimizeView findings={optimizeResult.findings} costRate={optimizeResult.costRate} projects={projects} label={headerLabel} width={dashWidth} healthScore={optimizeResult.healthScore} healthGrade={optimizeResult.healthGrade} cursor={findingsCursor} />
-          : <DashboardContent projects={projects} period={period} columns={columns} activeProvider={activeProvider} budgets={projectBudgets} planUsage={planUsage} />}
+          : <DashboardContent projects={projects} period={period} columns={columns} activeProvider={activeProvider} budgets={projectBudgets} planUsages={planUsages} />}
       {view !== 'compare' && <StatusBar width={dashWidth} showProvider={multipleProviders} view={view} findingCount={findingCount} optimizeAvailable={optimizeAvailable} compareAvailable={compareAvailable} customRange={isCustomRange} />}
     </Box>
   )
@@ -906,13 +922,13 @@ function CustomRangeBanner({ label, width }: { label: string; width: number }) {
   )
 }
 
-function StaticDashboard({ projects, period, activeProvider, planUsage }: { projects: ProjectSummary[]; period: Period; activeProvider?: string; planUsage?: PlanUsage }) {
+function StaticDashboard({ projects, period, activeProvider, planUsages }: { projects: ProjectSummary[]; period: Period; activeProvider?: string; planUsages?: PlanUsage[] }) {
   const { columns } = useWindowSize()
   const { dashWidth } = getLayout(columns)
   return (
     <Box flexDirection="column" width={dashWidth}>
       <PeriodTabs active={period} />
-      <DashboardContent projects={projects} period={period} columns={columns} activeProvider={activeProvider} planUsage={planUsage} />
+      <DashboardContent projects={projects} period={period} columns={columns} activeProvider={activeProvider} planUsages={planUsages} />
     </Box>
   )
 }
@@ -921,16 +937,16 @@ export async function renderDashboard(period: Period = 'week', provider: string 
   await loadPricing()
   const range = customRange ?? getPeriodRange(period)
   const filteredProjects = filterProjectsByName(await parseAllSessions(range, provider), projectFilter, excludeFilter)
-  const planUsage = await getPlanUsageOrNull()
+  const planUsages = await getPlanUsages()
   const isTTY = process.stdin.isTTY && process.stdout.isTTY
   patchStdoutForWindows()
   if (isTTY) {
     const { waitUntilExit } = render(
-      <InteractiveDashboard initialProjects={filteredProjects} initialPeriod={period} initialProvider={provider} initialPlanUsage={planUsage ?? undefined} refreshSeconds={refreshSeconds} projectFilter={projectFilter} excludeFilter={excludeFilter} customRange={customRange} customRangeLabel={customRangeLabel} />
+      <InteractiveDashboard initialProjects={filteredProjects} initialPeriod={period} initialProvider={provider} initialPlanUsages={planUsages} refreshSeconds={refreshSeconds} projectFilter={projectFilter} excludeFilter={excludeFilter} customRange={customRange} customRangeLabel={customRangeLabel} />
     )
     await waitUntilExit()
   } else {
-    const { unmount } = render(<StaticDashboard projects={filteredProjects} period={period} activeProvider={provider} planUsage={planUsage ?? undefined} />, { patchConsole: false })
+    const { unmount } = render(<StaticDashboard projects={filteredProjects} period={period} activeProvider={provider} planUsages={planUsages} />, { patchConsole: false })
     unmount()
   }
 }

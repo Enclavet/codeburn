@@ -1,5 +1,6 @@
-import { readPlan, type Plan } from './config.js'
+import { readPlans, type Plan, type PlanMap } from './config.js'
 import { parseAllSessions } from './parser.js'
+import { PLAN_PROVIDERS } from './plans.js'
 import type { DateRange, ProjectSummary } from './types.js'
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000
@@ -79,13 +80,15 @@ export function projectMonthEnd(
   for (const project of projects) {
     for (const session of project.sessions) {
       for (const turn of session.turns) {
-        if (!turn.timestamp) continue
-        const ts = new Date(turn.timestamp)
-        if (Number.isNaN(ts.getTime())) continue
-        if (ts < periodStart || ts > today) continue
-        const dayKey = toLocalDateKey(ts)
-        const turnCost = turn.assistantCalls.reduce((sum, call) => sum + call.costUSD, 0)
-        dayCosts.set(dayKey, (dayCosts.get(dayKey) ?? 0) + turnCost)
+        for (const call of turn.assistantCalls) {
+          const timestamp = call.timestamp || turn.timestamp
+          if (!timestamp) continue
+          const ts = new Date(timestamp)
+          if (Number.isNaN(ts.getTime())) continue
+          if (ts < periodStart || ts > today) continue
+          const dayKey = toLocalDateKey(ts)
+          dayCosts.set(dayKey, (dayCosts.get(dayKey) ?? 0) + call.costUSD)
+        }
       }
     }
   }
@@ -126,6 +129,45 @@ export function getPlanUsageFromProjects(plan: Plan, projects: ProjectSummary[],
   }
 }
 
+function getPlanScopedProjects(plan: Plan, projects: ProjectSummary[], today: Date): ProjectSummary[] {
+  const { periodStart } = computePeriodFromResetDay(plan.resetDay, today)
+  const provider = plan.provider
+
+  // These scoped clones are consumed only by plan usage math; cost/call rollups
+  // are recomputed below, while unrelated breakdown fields remain unchanged.
+  return projects
+    .map(project => {
+      const sessions = project.sessions
+        .map(session => {
+          const turns = session.turns
+            .map(turn => {
+              const assistantCalls = turn.assistantCalls.filter(call => {
+                if (provider !== 'all' && call.provider !== provider) return false
+                const timestamp = call.timestamp || turn.timestamp
+                if (!timestamp) return false
+                const ts = new Date(timestamp)
+                return !Number.isNaN(ts.getTime()) && ts >= periodStart && ts <= today
+              })
+              return assistantCalls.length > 0 ? { ...turn, assistantCalls } : null
+            })
+            .filter((turn): turn is NonNullable<typeof turn> => turn !== null)
+
+          const totalCostUSD = turns.reduce(
+            (sum, turn) => sum + turn.assistantCalls.reduce((turnSum, call) => turnSum + call.costUSD, 0),
+            0,
+          )
+          const apiCalls = turns.reduce((sum, turn) => sum + turn.assistantCalls.length, 0)
+          return apiCalls > 0 ? { ...session, turns, totalCostUSD, apiCalls } : null
+        })
+        .filter((session): session is NonNullable<typeof session> => session !== null)
+
+      const totalCostUSD = sessions.reduce((sum, session) => sum + session.totalCostUSD, 0)
+      const totalApiCalls = sessions.reduce((sum, session) => sum + session.apiCalls, 0)
+      return totalApiCalls > 0 ? { ...project, sessions, totalCostUSD, totalApiCalls } : null
+    })
+    .filter((project): project is NonNullable<typeof project> => project !== null)
+}
+
 export async function getPlanUsage(plan: Plan, today = new Date()): Promise<PlanUsage> {
   const { periodStart } = computePeriodFromResetDay(plan.resetDay, today)
   const range: DateRange = {
@@ -138,9 +180,34 @@ export async function getPlanUsage(plan: Plan, today = new Date()): Promise<Plan
 }
 
 export async function getPlanUsageOrNull(today = new Date()): Promise<PlanUsage | null> {
-  const plan = await readPlan()
-  if (!isActivePlan(plan)) return null
-  return getPlanUsage(plan, today)
+  return (await getPlanUsages(today))[0] ?? null
+}
+
+export function activePlansFromMap(plans: PlanMap): Plan[] {
+  return PLAN_PROVIDERS
+    .map(provider => plans[provider])
+    .filter(isActivePlan)
+}
+
+export async function getPlanUsages(today = new Date()): Promise<PlanUsage[]> {
+  const plans = activePlansFromMap(await readPlans())
+  if (plans.length === 0) return []
+
+  const starts = plans.map(plan => computePeriodFromResetDay(plan.resetDay, today).periodStart.getTime())
+  const range: DateRange = {
+    start: new Date(Math.min(...starts)),
+    end: today,
+  }
+
+  if (plans.length === 1) {
+    const plan = plans[0]!
+    const projects = await parseAllSessions(range, plan.provider === 'all' ? 'all' : plan.provider)
+    return [getPlanUsageFromProjects(plan, projects, today)]
+  }
+
+  const projects = await parseAllSessions(range, 'all')
+
+  return plans.map(plan => getPlanUsageFromProjects(plan, getPlanScopedProjects(plan, projects, today), today))
 }
 
 export function isActivePlan(plan: Plan | undefined): plan is Plan {

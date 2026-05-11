@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+### Added (CLI)
+- **Multiple subscription plans can be tracked at the same time.**
+  `codeburn plan set` now stores plans in a provider-keyed `plans` map, so
+  setting a Codex custom plan no longer overwrites an existing Claude plan.
+  `codeburn plan reset --provider <name>` removes only that provider's plan,
+  while `codeburn plan reset` remains a full reset. The dashboard and JSON
+  outputs include one overage summary per active provider plan. Aggregate
+  `all` plans remain mutually exclusive with provider-specific plans to avoid
+  double-counted overage rows. Existing single-plan `plan` config files
+  continue to load as a backward-compatible fallback, and subsequent writes
+  save the new `plans` map format. Preset plans now reject mismatched
+  `--provider` scopes instead of silently ignoring them. Closes #299.
+
 ## 0.9.8 - 2026-05-10
 
 ### Added (CLI)

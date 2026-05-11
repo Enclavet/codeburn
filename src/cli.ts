@@ -16,9 +16,9 @@ import { formatDateRangeLabel, parseDateRangeFlags, getDateRange, toPeriod, type
 import { runOptimize, scanAndDetect } from './optimize.js'
 import { renderCompare } from './compare.js'
 import { getAllProviders } from './providers/index.js'
-import { clearPlan, readConfig, readPlan, saveConfig, savePlan, getConfigFilePath, type PlanId } from './config.js'
-import { clampResetDay, getPlanUsageOrNull, type PlanUsage } from './plan-usage.js'
-import { getPresetPlan, isPlanId, isPlanProvider, planDisplayName } from './plans.js'
+import { clearPlan, readConfig, readPlans, saveConfig, savePlan, getConfigFilePath, type Plan, type PlanId, type PlanProvider } from './config.js'
+import { clampResetDay, getPlanUsages, type PlanUsage } from './plan-usage.js'
+import { getPresetPlan, isPlanId, isPlanProvider, PLAN_IDS, PLAN_PROVIDERS, planDisplayName } from './plans.js'
 import { createRequire } from 'node:module'
 
 const require = createRequire(import.meta.url)
@@ -51,6 +51,7 @@ function parseInteger(value: string): number {
 
 type JsonPlanSummary = {
   id: PlanId
+  provider: PlanProvider
   budget: number
   spent: number
   percentUsed: number
@@ -64,6 +65,7 @@ type JsonPlanSummary = {
 function toJsonPlanSummary(planUsage: PlanUsage): JsonPlanSummary {
   return {
     id: planUsage.plan.id,
+    provider: planUsage.plan.provider,
     budget: convertCost(planUsage.budgetUsd),
     spent: convertCost(planUsage.spentApiEquivalentUsd),
     percentUsed: Math.round(planUsage.percentUsed * 10) / 10,
@@ -73,6 +75,49 @@ function toJsonPlanSummary(planUsage: PlanUsage): JsonPlanSummary {
     periodStart: planUsage.periodStart.toISOString(),
     periodEnd: planUsage.periodEnd.toISOString(),
   }
+}
+
+type JsonPlanSummaryMap = Partial<Record<PlanProvider, JsonPlanSummary>>
+
+function toJsonPlanSummaryMap(planUsages: PlanUsage[]): JsonPlanSummaryMap {
+  const summaries: JsonPlanSummaryMap = {}
+  for (const usage of planUsages) {
+    summaries[usage.plan.provider] = toJsonPlanSummary(usage)
+  }
+  return summaries
+}
+
+async function attachPlanSummaries<T extends object>(payload: T): Promise<T & { plan?: JsonPlanSummary; plans?: JsonPlanSummaryMap }> {
+  const planUsages = await getPlanUsages()
+  if (planUsages.length > 0) {
+    return {
+      ...payload,
+      plan: toJsonPlanSummary(planUsages[0]!),
+      plans: toJsonPlanSummaryMap(planUsages),
+    }
+  }
+  return payload
+}
+
+function planLabel(plan: Plan): string {
+  const name = planDisplayName(plan.id)
+  return plan.id === 'custom' ? `${name} (${plan.provider})` : name
+}
+
+function toPlanDisplay(plan: Plan) {
+  return {
+    id: plan.id,
+    monthlyUsd: plan.monthlyUsd,
+    provider: plan.provider,
+    resetDay: clampResetDay(plan.resetDay),
+    setAt: plan.setAt || null,
+  }
+}
+
+function sortedPlans(plans: Partial<Record<PlanProvider, Plan>>): Plan[] {
+  return PLAN_PROVIDERS
+    .map(provider => plans[provider])
+    .filter((plan): plan is Plan => plan !== undefined)
 }
 
 function assertFormat(value: string, allowed: readonly string[], command: string): void {
@@ -88,11 +133,7 @@ async function runJsonReport(period: Period, provider: string, project: string[]
   await loadPricing()
   const { range, label } = getDateRange(period)
   const projects = filterProjectsByName(await parseAllSessions(range, provider), project, exclude)
-  const report: ReturnType<typeof buildJsonReport> & { plan?: JsonPlanSummary } = buildJsonReport(projects, label, period)
-  const planUsage = await getPlanUsageOrNull()
-  if (planUsage) {
-    report.plan = toJsonPlanSummary(planUsage)
-  }
+  const report: ReturnType<typeof buildJsonReport> & { plan?: JsonPlanSummary; plans?: JsonPlanSummaryMap } = await attachPlanSummaries(buildJsonReport(projects, label, period))
   console.log(JSON.stringify(report, null, 2))
 }
 
@@ -329,7 +370,7 @@ program
           opts.project,
           opts.exclude,
         )
-        console.log(JSON.stringify(buildJsonReport(projects, label, 'custom'), null, 2))
+        console.log(JSON.stringify(await attachPlanSummaries(buildJsonReport(projects, label, 'custom')), null, 2))
       } else {
         await runJsonReport(period, opts.provider, opts.project, opts.exclude)
       }
@@ -528,16 +569,13 @@ program
         today: { cost: number; calls: number }
         month: { cost: number; calls: number }
         plan?: JsonPlanSummary
+        plans?: JsonPlanSummaryMap
       } = {
         currency: code,
         today: { cost: Math.round(todayData.cost * rate * 100) / 100, calls: todayData.calls },
         month: { cost: Math.round(monthData.cost * rate * 100) / 100, calls: monthData.calls },
       }
-      const planUsage = await getPlanUsageOrNull()
-      if (planUsage) {
-        payload.plan = toJsonPlanSummary(planUsage)
-      }
-      console.log(JSON.stringify(payload))
+      console.log(JSON.stringify(await attachPlanSummaries(payload)))
       return
     }
 
@@ -764,45 +802,57 @@ program
   .description('Show or configure a subscription plan for overage tracking')
   .option('--format <format>', 'Output format: text or json', 'text')
   .option('--monthly-usd <n>', 'Monthly plan price in USD (for custom)', parseNumber)
-  .option('--provider <name>', 'Provider scope: all, claude, codex, cursor', 'all')
+  .option('--provider <name>', 'Provider scope: all, claude, codex, cursor')
   .option('--reset-day <n>', 'Day of month plan resets (1-28)', parseInteger, 1)
   .action(async (action?: string, id?: string, opts?: { format?: string; monthlyUsd?: number; provider?: string; resetDay?: number }) => {
     assertFormat(opts?.format ?? 'text', ['text', 'json'], 'plan')
     const mode = action ?? 'show'
+    const providerOption = opts?.provider
+    if (providerOption !== undefined && !isPlanProvider(providerOption)) {
+      console.error(`\n  --provider must be one of: all, claude, codex, cursor; got "${providerOption}".\n`)
+      process.exitCode = 1
+      return
+    }
 
     if (mode === 'show') {
-      const plan = await readPlan()
-      const displayPlan = !plan || plan.id === 'none'
-        ? { id: 'none', monthlyUsd: 0, provider: 'all', resetDay: 1, setAt: null }
-        : {
-            id: plan.id,
-            monthlyUsd: plan.monthlyUsd,
-            provider: plan.provider,
-            resetDay: clampResetDay(plan.resetDay),
-            setAt: plan.setAt,
-          }
+      const plans = sortedPlans(await readPlans())
+        .filter(plan => plan.id !== 'none')
+        .filter(plan => !providerOption || providerOption === 'all' || plan.provider === providerOption)
       if (opts?.format === 'json') {
-        console.log(JSON.stringify(displayPlan))
+        if (plans.length === 0) {
+          console.log(JSON.stringify({ id: 'none', monthlyUsd: 0, provider: 'all', resetDay: 1, setAt: null }))
+          return
+        }
+        console.log(JSON.stringify({
+          ...toPlanDisplay(plans[0]!),
+          plans: Object.fromEntries(plans.map(plan => [plan.provider, toPlanDisplay(plan)])),
+        }))
         return
       }
-      if (!plan || plan.id === 'none') {
+      if (plans.length === 0) {
         console.log('\n  Plan: none')
         console.log('  API-pricing view is active.')
         console.log(`  Config: ${getConfigFilePath()}\n`)
         return
       }
-      console.log(`\n  Plan: ${planDisplayName(plan.id)} (${plan.id})`)
-      console.log(`  Budget: $${plan.monthlyUsd}/month`)
-      console.log(`  Provider: ${plan.provider}`)
-      console.log(`  Reset day: ${clampResetDay(plan.resetDay)}`)
-      console.log(`  Set at: ${plan.setAt}`)
+      console.log(`\n  Plans: ${plans.length}`)
+      for (const plan of plans) {
+        console.log(`  ${plan.provider}: ${planLabel(plan)} (${plan.id})`)
+        console.log(`    Budget: $${plan.monthlyUsd}/month`)
+        console.log(`    Reset day: ${clampResetDay(plan.resetDay)}`)
+        if (plan.setAt) console.log(`    Set at: ${plan.setAt}`)
+      }
       console.log(`  Config: ${getConfigFilePath()}\n`)
       return
     }
 
     if (mode === 'reset') {
-      await clearPlan()
-      console.log('\n  Plan reset. API-pricing view is active.\n')
+      await clearPlan(providerOption)
+      if (providerOption) {
+        console.log(`\n  Plan reset for ${providerOption}.\n`)
+      } else {
+        console.log('\n  Plan reset. API-pricing view is active.\n')
+      }
       return
     }
 
@@ -813,7 +863,7 @@ program
     }
 
     if (!id || !isPlanId(id)) {
-      console.error(`\n  Plan id must be one of: claude-pro, claude-max, cursor-pro, custom, none; got "${id ?? ''}".\n`)
+      console.error(`\n  Plan id must be one of: ${PLAN_IDS.join(', ')}; got "${id ?? ''}".\n`)
       process.exitCode = 1
       return
     }
@@ -826,8 +876,12 @@ program
     }
 
     if (id === 'none') {
-      await clearPlan()
-      console.log('\n  Plan reset. API-pricing view is active.\n')
+      await clearPlan(providerOption)
+      if (providerOption) {
+        console.log(`\n  Plan reset for ${providerOption}.\n`)
+      } else {
+        console.log('\n  Plan reset. API-pricing view is active.\n')
+      }
       return
     }
 
@@ -843,12 +897,7 @@ program
         process.exitCode = 1
         return
       }
-      const provider = opts?.provider ?? 'all'
-      if (!isPlanProvider(provider)) {
-        console.error(`\n  --provider must be one of: all, claude, codex, cursor; got "${provider}".\n`)
-        process.exitCode = 1
-        return
-      }
+      const provider = providerOption ?? 'all'
       await savePlan({
         id: 'custom',
         monthlyUsd,
@@ -864,6 +913,18 @@ program
     const preset = getPresetPlan(id)
     if (!preset) {
       console.error(`\n  Unknown preset "${id}".\n`)
+      process.exitCode = 1
+      return
+    }
+
+    if (providerOption === 'all') {
+      console.error(`\n  ${id} is a ${preset.provider} plan; omit --provider or use --provider ${preset.provider}.\n`)
+      process.exitCode = 1
+      return
+    }
+
+    if (providerOption && providerOption !== preset.provider) {
+      console.error(`\n  ${id} is a ${preset.provider} plan; use --provider ${preset.provider} or omit --provider.\n`)
       process.exitCode = 1
       return
     }
