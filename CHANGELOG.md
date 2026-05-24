@@ -73,6 +73,11 @@
   because the cache shortcut only merged cost/calls. Per-provider periods now
   always do a full parse. Also floors `maxCost` at 0.01 to avoid NaN bar
   widths in ActivitySection and ModelsSection. (#362)
+- **Kiro post-February 2026 storage discovery.** The Kiro provider now keeps
+  legacy `.chat` support while also discovering extensionless session index
+  files and nested execution files. Modern execution JSON is parsed for
+  identifiers, timestamps, model IDs, conversation text, structured tools, and
+  estimated token usage. Thanks @ozymandiashh. Closes #329. (#339)
 
 ### Fixed (macOS menubar)
 - **Per-provider refresh latency.** Switching provider tabs took ~24s on heavy
