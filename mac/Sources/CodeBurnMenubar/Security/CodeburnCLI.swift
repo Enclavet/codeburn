@@ -99,6 +99,13 @@ enum CodeburnCLI {
         return process
     }
 
+    // argv tokens are `isSafe`-validated and PATH entries are constants, so the
+    // result is safe to interpolate directly into the LaunchAgent shell script.
+    static func scriptEnvironment() -> (argv: [String], path: String) {
+        let basePath = ProcessInfo.processInfo.environment["PATH"] ?? ""
+        return (baseArgv(), augmentedPath(basePath))
+    }
+
     static func isSafe(_ s: String) -> Bool {
         let range = NSRange(s.startIndex..<s.endIndex, in: s)
         return safeArgPattern.firstMatch(in: s, range: range) != nil
