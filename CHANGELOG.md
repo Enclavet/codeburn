@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Fixed (CLI)
+- **Antigravity hook stale path repair.** `codeburn antigravity-hook install`
+  now installs the statusLine command through a persistent `codeburn` binary
+  from PATH and repairs older CodeBurn-owned hooks that pointed at stale local
+  build artifacts, preventing `agy` from auto-disabling capture after
+  `MODULE_NOT_FOUND` failures.
+
 ## 0.9.11 - 2026-05-27
 
 ### Added (CLI)

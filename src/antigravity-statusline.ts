@@ -1,6 +1,7 @@
-import { mkdir, open, readFile, rename, unlink } from 'fs/promises'
+import { constants } from 'fs'
+import { access, mkdir, open, readFile, rename, unlink } from 'fs/promises'
 import { randomBytes } from 'crypto'
-import { dirname, join } from 'path'
+import { delimiter, dirname, join } from 'path'
 import { homedir } from 'os'
 
 import {
@@ -18,6 +19,12 @@ type Settings = Record<string, unknown> & {
 
 type StatusLineSettings = NonNullable<Settings['statusLine']>
 
+const PERSISTENT_CLI_REQUIRED_MESSAGE =
+  'The Antigravity hook needs a persistent codeburn command. Install CodeBurn globally first: npm install -g codeburn'
+const DEFAULT_CLI_LOOKUP_PATHS = process.platform === 'win32'
+  ? []
+  : ['/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin']
+
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
@@ -31,10 +38,49 @@ function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`
 }
 
-function hookCommand(): string {
-  const script = process.argv[1] || 'codeburn'
-  if (script === 'codeburn') return 'codeburn agy-statusline-hook'
-  return `${shellQuote(process.execPath)} ${shellQuote(script)} agy-statusline-hook`
+function isTransientNpxPath(path: string): boolean {
+  return path.includes('/_npx/') || path.includes('/.npm/_npx/') || path.includes('\\_npx\\')
+}
+
+function codeburnExecutableNames(): string[] {
+  if (process.platform !== 'win32') return ['codeburn']
+  return ['codeburn.cmd', 'codeburn.exe', 'codeburn.bat', 'codeburn']
+}
+
+export function buildAntigravityHookLookupPath(existingPath = process.env.PATH ?? ''): string {
+  const parts = existingPath.split(delimiter).filter(Boolean)
+  for (const fallback of DEFAULT_CLI_LOOKUP_PATHS) {
+    if (!parts.includes(fallback)) parts.push(fallback)
+  }
+  return parts.join(delimiter)
+}
+
+async function executableExists(path: string): Promise<boolean> {
+  try {
+    await access(path, process.platform === 'win32' ? constants.F_OK : constants.F_OK | constants.X_OK)
+    return true
+  } catch {
+    return false
+  }
+}
+
+export async function resolvePersistentCodeburnPathFromPath(lookupPath: string): Promise<string> {
+  const seen = new Set<string>()
+  for (const dir of lookupPath.split(delimiter).filter(Boolean)) {
+    for (const executable of codeburnExecutableNames()) {
+      const candidate = join(dir, executable)
+      if (seen.has(candidate)) continue
+      seen.add(candidate)
+      if (isTransientNpxPath(candidate)) continue
+      if (await executableExists(candidate)) return candidate
+    }
+  }
+  throw new Error(PERSISTENT_CLI_REQUIRED_MESSAGE)
+}
+
+async function hookCommand(): Promise<string> {
+  const codeburnPath = await resolvePersistentCodeburnPathFromPath(buildAntigravityHookLookupPath())
+  return `${shellQuote(codeburnPath)} agy-statusline-hook`
 }
 
 function settingsPath(): string {
@@ -115,12 +161,15 @@ export async function installAntigravityStatusLineHook(force = false): Promise<'
     )
   }
 
-  if (isCodeBurnHook(existing?.command)) return 'already-installed'
+  const command = await hookCommand()
+  if (isCodeBurnHook(existing?.command) && existing?.command === command && existing.type === 'command' && existing.padding === 0) {
+    return 'already-installed'
+  }
   if (existing && !isCodeBurnHook(existing.command)) await savePreviousStatusLine(existing)
 
   settings.statusLine = {
     type: 'command',
-    command: hookCommand(),
+    command,
     padding: 0,
   }
   await writeSettings(settings)
