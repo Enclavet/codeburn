@@ -183,14 +183,15 @@ function createParser(source: SessionSource, seenKeys: Set<string>): SessionPars
 
         const pm = meta.providerMetadata ?? {}
         const anthropic = asRecord(pm['anthropic'])
-        const openai = asRecord(pm['openai'])
 
         // mux reports inputTokens inclusive of cache read+creation and
         // outputTokens inclusive of reasoning; decompose to codeburn's
         // cache/reasoning-exclusive convention. Cache creation is Anthropic-only.
+        // The AI SDK v6 normalizes reasoning into usage.reasoningTokens across
+        // every provider family, so that field is the single source of truth.
         const cacheRead = num(usage['cachedInputTokens'])
         const cacheCreate = num(anthropic?.['cacheCreationInputTokens'])
-        const reasoning = num(usage['reasoningTokens']) || num(openai?.['reasoningTokens'])
+        const reasoning = num(usage['reasoningTokens'])
         const inputTokens = Math.max(0, num(usage['inputTokens']) - cacheRead - cacheCreate)
         const outputTokens = Math.max(0, num(usage['outputTokens']) - reasoning)
 
