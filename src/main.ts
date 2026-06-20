@@ -15,6 +15,12 @@ import { buildPeriodData, buildMenubarPayloadForRange } from './usage-aggregator
 import { renderDashboard } from './dashboard.js'
 import { renderOverview } from './overview.js'
 import { runWebDashboard } from './web-dashboard.js'
+import { hostname } from 'os'
+import { runShareServer } from './sharing/share-run.js'
+import { addRemote, linkRemote, pullDevices, renderDevices } from './sharing/host.js'
+import { browse } from './sharing/discovery.js'
+import { promptChoice } from './sharing/prompt.js'
+import { loadRemotes, saveRemotes } from './sharing/store.js'
 import { formatDateRangeLabel, parseDateRangeFlags, parseDayFlag, parseDaysFlag, getDateRange, toPeriod, type Period } from './cli-date.js'
 import { runOptimize } from './optimize.js'
 import { renderCompare } from './compare.js'
@@ -476,6 +482,71 @@ program
     }
     const customRangeLabel = customRange ? formatDateRangeLabel(opts.from, opts.to) : undefined
     await renderDashboard(period, opts.provider, opts.refresh, opts.project, opts.exclude, customRange, customRangeLabel, daySelection?.day)
+  })
+
+program
+  .command('share')
+  .description("Securely share this device's usage with your other devices on the same network")
+  .option('--port <number>', 'Port to listen on', parseInteger, 7777)
+  .option('--pair', 'Open a pairing window and print a PIN to add a new device')
+  .option('--always', 'Keep sharing until stopped (default stops after 10 min idle)')
+  .action(async (opts) => {
+    await runShareServer({ port: opts.port, pair: !!opts.pair, always: !!opts.always })
+  })
+
+program
+  .command('devices [action] [target]')
+  .description('Combined usage across your devices. Actions: add (find nearby & pair) | add <host> --pin <pin> (manual) | rm <name>')
+  .option('--pin <pin>', 'Pairing PIN shown on the device you are adding')
+  .option('-p, --period <period>', 'Period: today, week, 30days, month, all', 'month')
+  .option('--port <number>', 'Default port when adding a device', parseInteger, 7777)
+  .action(async (action: string | undefined, target: string | undefined, opts) => {
+    await loadPricing()
+    if (action === 'add') {
+      if (target && opts.pin) {
+        const device = await addRemote(target, opts.pin, { defaultPort: opts.port })
+        console.log(`\n  Paired with "${device.name}" (${device.host}:${device.port}).\n`)
+        return
+      }
+      process.stdout.write('\n  Looking for devices on your network...\n')
+      const found = await browse(3000)
+      if (found.length === 0) {
+        console.error('  No devices found. On the other Mac run `codeburn share`, and make sure both are on the same Wi-Fi.\n')
+        process.exit(1)
+      }
+      let chosen = found[0]!
+      if (found.length > 1) {
+        found.forEach((d, i) => process.stdout.write(`    ${i + 1}) ${d.name} (${d.host})\n`))
+        const n = await promptChoice('  Connect to which? [number]', found.length)
+        if (n < 1) {
+          console.error('  Cancelled.\n')
+          process.exit(1)
+        }
+        chosen = found[n - 1]!
+      }
+      const device = await linkRemote(chosen, {
+        onCode: (code) =>
+          process.stdout.write(`\n  Connecting to "${chosen.name}". Confirm this code on that device:  ${code}\n  Waiting for approval...\n`),
+      })
+      console.log(`\n  Paired with "${device.name}".\n`)
+      return
+    }
+    if (action === 'rm' || action === 'remove') {
+      const remotes = await loadRemotes()
+      const next = remotes.filter((r) => r.name !== target && `${r.host}:${r.port}` !== target)
+      await saveRemotes(next)
+      console.log(`\n  Removed ${remotes.length - next.length} device(s).\n`)
+      return
+    }
+    const localGetUsage = async (q: { period?: string; from?: string; to?: string }) => {
+      const customRange = parseDateRangeFlags(q.from, q.to)
+      const periodInfo = customRange
+        ? { range: customRange, label: formatDateRangeLabel(q.from, q.to) }
+        : getDateRange(toPeriod(q.period ?? opts.period))
+      return buildMenubarPayloadForRange(periodInfo, { provider: 'all', optimize: false })
+    }
+    const results = await pullDevices(localGetUsage, { period: opts.period }, hostname(), {})
+    process.stdout.write('\n' + renderDevices(results))
   })
 
 program
