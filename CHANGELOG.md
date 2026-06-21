@@ -28,6 +28,13 @@
 - CNY currency support. (#430)
 - Contribution heatmap insight. (#437)
 
+### Added (CLI)
+- **Hermes Agent provider.** Track token usage, cost, and tool breakdowns
+  for Hermes Agent sessions. Reads from `~/.hermes/state.db` and per-profile
+  databases. Supports session-level accounting with actual/estimated costs
+  from Hermes, falling back to CodeBurn's model pricing table. Supersedes
+  #386, closes #368.
+
 ### Fixed (CLI)
 - **Per-file parse isolation.** A single malformed session file no longer
   aborts the run or empties the daily-history trend; parse failures are cached
