@@ -570,6 +570,7 @@ Sponsoring as a team or company? Your logo lands right here, in front of every d
 ## License
 
 MIT
+CodeBurn is an AgentSeal open-source project and is not affiliated with CodeBurn Bt. or codeburn.hu.
 
 ## Credits
 
