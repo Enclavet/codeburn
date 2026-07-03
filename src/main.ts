@@ -25,6 +25,7 @@ import type { UsageQuery } from './sharing/share-server.js'
 import { formatDateRangeLabel, parseDateRangeFlags, parseDayFlag, parseDaysFlag, getDateRange, toPeriod, type Period } from './cli-date.js'
 import { runOptimize } from './optimize.js'
 import { registerActCommands } from './act/cli.js'
+import { registerGuardCommands } from './guard/cli.js'
 import { runContextCommand } from './context-tree.js'
 import { renderCompare } from './compare.js'
 import {
@@ -1555,5 +1556,6 @@ program
   })
 
 registerActCommands(program)
+registerGuardCommands(program)
 
 program.parse()
