@@ -212,7 +212,9 @@ export type FindingId =
 // on findings that have an appliable plan; absent otherwise.
 export type FindingApply =
   | { kind: 'mcp-remove'; servers: string[] }
-  | { kind: 'mcp-project-scope'; servers: Array<{ server: string; keepProjects: string[] }> }
+  // keepProjects gain the entry; removeProjects (the cold projects) are the
+  // only per-project containers a scoped removal may touch.
+  | { kind: 'mcp-project-scope'; servers: Array<{ server: string; keepProjects: string[]; removeProjects: string[] }> }
   | { kind: 'archive'; names: string[] }
 
 export type WasteFinding = {
@@ -1222,7 +1224,11 @@ export function detectMcpProfileAdvisor(
     },
     apply: {
       kind: 'mcp-project-scope',
-      servers: candidates.map(c => ({ server: c.server, keepProjects: c.hotProjects.map(p => p.projectPath) })),
+      servers: candidates.map(c => ({
+        server: c.server,
+        keepProjects: c.hotProjects.map(p => p.projectPath),
+        removeProjects: c.coldProjects.map(p => p.projectPath),
+      })),
     },
   }
 }
@@ -1525,6 +1531,7 @@ export function detectUnusedMcp(
     explanation: `Never called in this period: ${unused.join(', ')}. Each server loads ~${TOOLS_PER_MCP_SERVER * TOKENS_PER_MCP_TOOL} tokens of tool schema into every session.`,
     impact: unused.length >= UNUSED_MCP_HIGH_THRESHOLD ? 'high' : 'medium',
     tokensSaved,
+    apply: { kind: 'mcp-remove', servers: unused },
     fix: {
       type: 'command',
       label: `Remove unused server${unused.length > 1 ? 's' : ''}:`,

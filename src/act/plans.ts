@@ -19,6 +19,9 @@ export type BuiltPlan = {
   plan: ActionPlan | null
   // Human-facing skip reasons and parse errors, surfaced in the apply summary.
   notes: string[]
+  // Per-file preview annotations (path -> text), e.g. which ~/.claude.json
+  // project entries lose a server.
+  pathNotes?: Record<string, string>
 }
 
 export type FindingPlan = BuiltPlan & { finding: WasteFinding }
@@ -68,6 +71,7 @@ export function planFindings(findings: WasteFinding[], ctx: PlanContext = {}): F
 function buildPlan(finding: WasteFinding, r: ResolvedPaths): BuiltPlan {
   switch (finding.id) {
     case 'mcp-low-coverage': return buildMcpRemove(finding, r)
+    case 'unused-mcp': return buildMcpRemove(finding, r)
     case 'mcp-project-scope': return buildMcpProjectScope(finding, r)
     case 'unused-skills': return buildArchive(finding, r, 'skill')
     case 'unused-agents': return buildArchive(finding, r, 'agent')
@@ -127,6 +131,7 @@ class ConfigDocs {
       this.docs.set(path, null)
       return null
     }
+    if (raw.charCodeAt(0) === 0xfeff) raw = raw.slice(1)
     try {
       const doc = JSON.parse(raw) as Record<string, unknown>
       const state: DocState = { path, doc, existed: true, dirty: false }
@@ -158,41 +163,58 @@ class ConfigDocs {
   }
 }
 
-function serverContainers(state: DocState, isUserClaudeJson: boolean): Array<Record<string, unknown>> {
-  const containers: Array<Record<string, unknown>> = []
+type ContainerRef = { container: Record<string, unknown>; projectPath: string | null }
+
+function serverContainers(state: DocState, isUserClaudeJson: boolean): ContainerRef[] {
+  const containers: ContainerRef[] = []
   const top = state.doc.mcpServers
-  if (top && typeof top === 'object') containers.push(top as Record<string, unknown>)
+  if (top && typeof top === 'object') containers.push({ container: top as Record<string, unknown>, projectPath: null })
   if (isUserClaudeJson) {
     const projects = state.doc.projects
     if (projects && typeof projects === 'object') {
-      for (const entry of Object.values(projects as Record<string, unknown>)) {
+      for (const [projectPath, entry] of Object.entries(projects as Record<string, unknown>)) {
         const pm = (entry as Record<string, unknown> | null)?.['mcpServers']
-        if (pm && typeof pm === 'object') containers.push(pm as Record<string, unknown>)
+        if (pm && typeof pm === 'object') containers.push({ container: pm as Record<string, unknown>, projectPath })
       }
     }
   }
   return containers
 }
 
-function deleteServer(state: DocState, server: string, isUserClaudeJson: boolean): boolean {
+// Deletes the server from the file's containers. With projectScope set, only
+// the top-level container and the listed (cold) project entries are touched;
+// entries under any other project path keep their copy.
+function deleteServer(
+  state: DocState,
+  server: string,
+  isUserClaudeJson: boolean,
+  projectScope?: ReadonlySet<string>,
+): { removed: boolean; projectEntries: string[] } {
   let removed = false
-  for (const container of serverContainers(state, isUserClaudeJson)) {
+  const projectEntries: string[] = []
+  for (const { container, projectPath } of serverContainers(state, isUserClaudeJson)) {
+    if (projectScope && projectPath !== null && !projectScope.has(projectPath)) continue
     const key = findServerKey(container, server)
-    if (key) {
-      delete container[key]
-      state.dirty = true
-      removed = true
-    }
+    if (!key) continue
+    delete container[key]
+    state.dirty = true
+    removed = true
+    if (projectPath !== null) projectEntries.push(projectPath)
   }
-  return removed
+  return { removed, projectEntries }
 }
 
 function readServerValue(state: DocState, server: string, isUserClaudeJson: boolean): unknown {
-  for (const container of serverContainers(state, isUserClaudeJson)) {
+  for (const { container } of serverContainers(state, isUserClaudeJson)) {
     const key = findServerKey(container, server)
     if (key) return container[key]
   }
   return undefined
+}
+
+function projectRemovalNote(server: string, entries: string[], homeDir: string): string {
+  const noun = entries.length === 1 ? 'entry' : 'entries'
+  return `removes ${server} from ${entries.length} project ${noun}: ${entries.map(e => shortPath(e, homeDir)).join(', ')}`
 }
 
 function buildMcpRemove(finding: WasteFinding, r: ResolvedPaths): BuiltPlan {
@@ -200,13 +222,19 @@ function buildMcpRemove(finding: WasteFinding, r: ResolvedPaths): BuiltPlan {
   const searchPaths = [r.projectMcpJson, r.projectSettings, r.projectSettingsLocal, r.userClaudeJson]
   const docs = new ConfigDocs(r.homeDir)
   const skips: string[] = []
+  const pathNotes: Record<string, string> = {}
+  const addPathNote = (path: string, note: string): void => {
+    pathNotes[path] = pathNotes[path] ? `${pathNotes[path]}; ${note}` : note
+  }
 
   for (const server of servers) {
     let removed = false
     for (const path of searchPaths) {
       const state = docs.load(path)
       if (!state) continue
-      if (deleteServer(state, server, path === r.userClaudeJson)) removed = true
+      const res = deleteServer(state, server, path === r.userClaudeJson)
+      if (res.removed) removed = true
+      if (res.projectEntries.length > 0) addPathNote(path, projectRemovalNote(server, res.projectEntries, r.homeDir))
     }
     if (!removed) skips.push(`skipped ${server}: not found in editable config (plugin or managed config?)`)
   }
@@ -217,6 +245,7 @@ function buildMcpRemove(finding: WasteFinding, r: ResolvedPaths): BuiltPlan {
   return {
     plan: mcpPlan('mcp-remove', finding.id, `Remove ${changes.length === 1 ? 'an MCP server' : 'MCP servers'} from config`, changes),
     notes,
+    ...(Object.keys(pathNotes).length > 0 ? { pathNotes } : {}),
   }
 }
 
@@ -225,8 +254,12 @@ function buildMcpProjectScope(finding: WasteFinding, r: ResolvedPaths): BuiltPla
   const searchPaths = [r.projectMcpJson, r.projectSettings, r.projectSettingsLocal, r.userClaudeJson]
   const docs = new ConfigDocs(r.homeDir)
   const skips: string[] = []
+  const pathNotes: Record<string, string> = {}
+  const addPathNote = (path: string, note: string): void => {
+    pathNotes[path] = pathNotes[path] ? `${pathNotes[path]}; ${note}` : note
+  }
 
-  for (const { server, keepProjects } of entries) {
+  for (const { server, keepProjects, removeProjects } of entries) {
     const keepers = keepProjects.filter(p => isAbsolute(p))
     if (keepers.length === 0) {
       skips.push(`skipped ${server}: no absolute keeper project path to scope into`)
@@ -245,12 +278,19 @@ function buildMcpProjectScope(finding: WasteFinding, r: ResolvedPaths): BuiltPla
       continue
     }
 
+    // Scoped removal: only the global entry and the finding's cold projects
+    // lose the server. The cwd's own config files count as cold only when
+    // the cwd is in the cold list; a keeper or unrelated cwd keeps its copy.
+    const coldSet = new Set(removeProjects)
     const keeperMcpPaths = new Set(keepers.map(k => join(k, '.mcp.json')))
     for (const path of searchPaths) {
       if (keeperMcpPaths.has(path)) continue
+      const isUser = path === r.userClaudeJson
+      if (!isUser && !coldSet.has(r.cwd)) continue
       const state = docs.load(path)
       if (!state) continue
-      deleteServer(state, server, path === r.userClaudeJson)
+      const res = deleteServer(state, server, isUser, isUser ? coldSet : undefined)
+      if (res.projectEntries.length > 0) addPathNote(path, projectRemovalNote(server, res.projectEntries, r.homeDir))
     }
 
     for (const keeper of keepers) {
@@ -274,6 +314,7 @@ function buildMcpProjectScope(finding: WasteFinding, r: ResolvedPaths): BuiltPla
   return {
     plan: mcpPlan('mcp-project-scope', finding.id, `Project-scope ${entries.length === 1 ? 'an MCP server' : 'MCP servers'}`, changes),
     notes,
+    ...(Object.keys(pathNotes).length > 0 ? { pathNotes } : {}),
   }
 }
 

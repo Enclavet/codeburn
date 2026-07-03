@@ -4,12 +4,13 @@ import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createHash } from 'node:crypto'
+import { PassThrough, Writable } from 'node:stream'
 
-import { planFor, planFindings } from '../src/act/plans.js'
-import { renderApplyList } from '../src/act/optimize-apply.js'
+import { planFor, planFindings, type PlanContext } from '../src/act/plans.js'
+import { renderApplyList, runOptimizeApply, type ApplyOptions } from '../src/act/optimize-apply.js'
 import { runAction } from '../src/act/apply.js'
 import { undoAction } from '../src/act/undo.js'
-import { readRecords } from '../src/act/journal.js'
+import { readRecords, shortId } from '../src/act/journal.js'
 import {
   detectBloatedClaudeMd,
   detectDuplicateReads,
@@ -118,7 +119,7 @@ describe('mcp-project-scope plan', () => {
 
     const finding = makeFinding('mcp-project-scope', { type: 'paste', destination: 'prompt', label: '', text: '' }, {
       kind: 'mcp-project-scope',
-      servers: [{ server: 'srv', keepProjects: [keeper] }],
+      servers: [{ server: 'srv', keepProjects: [keeper], removeProjects: [] }],
     })
     const plan = planFor(finding, { homeDir: fx.home, cwd: fx.project })
     expect(plan).not.toBeNull()
@@ -318,5 +319,270 @@ describe('finding-id regression guard', () => {
     }
     const ids = findings.map(f => f.id)
     expect(new Set(ids).size).toBe(ids.length)
+  })
+})
+
+describe('unused-mcp plan', () => {
+  it('builds a remove-everywhere plan, including other projects[*] entries', async () => {
+    const fx = await makeFixture()
+    const claudeJson = join(fx.home, '.claude.json')
+    await writeFile(claudeJson, JSON.stringify({
+      mcpServers: { u: { command: 'u' } },
+      projects: { '/some/other': { mcpServers: { u: { command: 'u' }, keepme: {} } } },
+    }, null, 2) + '\n')
+
+    const finding = makeFinding('unused-mcp', CMD_FIX, { kind: 'mcp-remove', servers: ['u'] })
+    const plan = planFor(finding, { homeDir: fx.home, cwd: fx.project })
+    expect(plan).not.toBeNull()
+    expect(plan!.kind).toBe('mcp-remove')
+
+    await runAction(plan!, fx.actionsDir)
+    const after = JSON.parse(await readFile(claudeJson, 'utf-8'))
+    expect(after.mcpServers).toEqual({})
+    expect(after.projects['/some/other'].mcpServers).toEqual({ keepme: {} })
+  })
+})
+
+describe('BOM handling', () => {
+  it('parses a config file with a UTF-8 BOM', async () => {
+    const fx = await makeFixture()
+    const claudeJson = join(fx.home, '.claude.json')
+    await writeFile(claudeJson, '﻿' + JSON.stringify({ mcpServers: { b: {} }, keep: 1 }, null, 2) + '\n')
+
+    const { plan, notes } = planFindings(
+      [makeFinding('mcp-low-coverage', CMD_FIX, { kind: 'mcp-remove', servers: ['b'] })],
+      { homeDir: fx.home, cwd: fx.project },
+    )[0]!
+    expect(notes).toEqual([])
+    expect(plan).not.toBeNull()
+    const written = JSON.parse(String(plan!.changes[0]!.content))
+    expect(written).toEqual({ mcpServers: {}, keep: 1 })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// runOptimizeApply end-to-end (injected stdio, crafted findings, fixture home)
+// ---------------------------------------------------------------------------
+
+const ANSI = /\[[0-9;]*m/g
+
+type Io = {
+  input: PassThrough
+  output: Writable
+  errorOutput: Writable
+  stdout(): string
+  stderr(): string
+}
+
+function makeIo(answer?: string): Io {
+  const input = new PassThrough()
+  input.end(answer ?? '')
+  const outChunks: Buffer[] = []
+  const errChunks: Buffer[] = []
+  const output = new Writable({ write(c, _e, cb) { outChunks.push(Buffer.from(c)); cb() } })
+  const errorOutput = new Writable({ write(c, _e, cb) { errChunks.push(Buffer.from(c)); cb() } })
+  return {
+    input,
+    output,
+    errorOutput,
+    stdout: () => Buffer.concat(outChunks).toString('utf-8').replace(ANSI, ''),
+    stderr: () => Buffer.concat(errChunks).toString('utf-8').replace(ANSI, ''),
+  }
+}
+
+function applyOpts(fx: Fixture, io: Io, extra: Partial<ApplyOptions> & { findings: WasteFinding[] }): ApplyOptions {
+  const ctx: PlanContext = { homeDir: fx.home, cwd: fx.project, shell: '/bin/zsh' }
+  return {
+    ctx,
+    actionsDir: fx.actionsDir,
+    input: io.input,
+    output: io.output,
+    errorOutput: io.errorOutput,
+    ...extra,
+  }
+}
+
+// One mcp server, one skill, one shell cap: three appliable findings in a
+// stable 1/2/3 order for the picker tests.
+async function threeFindingFixture(): Promise<{ fx: Fixture; findings: WasteFinding[] }> {
+  const fx = await makeFixture()
+  await writeFile(join(fx.home, '.claude.json'), JSON.stringify({ mcpServers: { a: { command: 'a' } } }, null, 2) + '\n')
+  await mkdir(join(fx.home, '.claude', 'skills', 'foo'), { recursive: true })
+  await writeFile(join(fx.home, '.claude', 'skills', 'foo', 'SKILL.md'), 'x')
+  const findings: WasteFinding[] = [
+    makeFinding('mcp-low-coverage', CMD_FIX, { kind: 'mcp-remove', servers: ['a'] }),
+    makeFinding('unused-skills', CMD_FIX, { kind: 'archive', names: ['foo'] }),
+    makeFinding('bash-output-cap', { type: 'paste', destination: 'shell-config', label: '', text: 'export BASH_MAX_OUTPUT_LENGTH=15000' }),
+  ]
+  return { fx, findings }
+}
+
+describe('runOptimizeApply end-to-end', () => {
+  it('--yes applies every plan and prints journal short ids with the undo hint', async () => {
+    const { fx, findings } = await threeFindingFixture()
+    const io = makeIo()
+    await runOptimizeApply([], undefined, applyOpts(fx, io, { findings, yes: true }))
+
+    const records = await readRecords(fx.actionsDir)
+    expect(records).toHaveLength(3)
+    const out = io.stdout()
+    for (const rec of records) {
+      expect(out).toContain(`Applied ${shortId(rec.id)}`)
+      expect(out).toContain(`Undo anytime: codeburn act undo ${shortId(rec.id)}`)
+    }
+    expect(JSON.parse(await readFile(join(fx.home, '.claude.json'), 'utf-8')).mcpServers).toEqual({})
+    expect(existsSync(join(fx.home, '.claude', 'skills', '.archived', 'foo'))).toBe(true)
+    expect(existsSync(join(fx.home, '.zshrc'))).toBe(true)
+  })
+
+  it('interactive pick "2" applies only the second plan', async () => {
+    const { fx, findings } = await threeFindingFixture()
+    const io = makeIo('2\n')
+    await runOptimizeApply([], undefined, applyOpts(fx, io, { findings }))
+
+    const records = await readRecords(fx.actionsDir)
+    expect(records).toHaveLength(1)
+    expect(records[0]!.kind).toBe('archive-skill')
+    expect(JSON.parse(await readFile(join(fx.home, '.claude.json'), 'utf-8')).mcpServers).toEqual({ a: { command: 'a' } })
+    expect(existsSync(join(fx.home, '.zshrc'))).toBe(false)
+  })
+
+  it('interactive pick "1,3" applies the first and third plans', async () => {
+    const { fx, findings } = await threeFindingFixture()
+    const io = makeIo('1,3\n')
+    await runOptimizeApply([], undefined, applyOpts(fx, io, { findings }))
+
+    const records = await readRecords(fx.actionsDir)
+    expect(records.map(r => r.kind).sort()).toEqual(['mcp-remove', 'shell-config'])
+    expect(existsSync(join(fx.home, '.claude', 'skills', 'foo'))).toBe(true)
+  })
+
+  it('a garbage answer applies nothing and prints the empty outcome', async () => {
+    const { fx, findings } = await threeFindingFixture()
+    const io = makeIo('wat\n')
+    await runOptimizeApply([], undefined, applyOpts(fx, io, { findings }))
+
+    expect(await readRecords(fx.actionsDir)).toHaveLength(0)
+    expect(io.stdout()).toContain('Nothing applied.')
+  })
+
+  it('EOF at the prompt prints "Nothing applied." and leaves the exit code untouched', async () => {
+    const { fx, findings } = await threeFindingFixture()
+    const io = makeIo()
+    const prevExit = process.exitCode
+    await runOptimizeApply([], undefined, applyOpts(fx, io, { findings }))
+
+    expect(process.exitCode).toBe(prevExit)
+    expect(io.stdout()).toContain('Nothing applied.')
+    expect(await readRecords(fx.actionsDir)).toHaveLength(0)
+  })
+
+  it('--only restricts the applied set', async () => {
+    const { fx, findings } = await threeFindingFixture()
+    const io = makeIo()
+    await runOptimizeApply([], undefined, applyOpts(fx, io, { findings, yes: true, only: 'unused-skills' }))
+
+    const records = await readRecords(fx.actionsDir)
+    expect(records).toHaveLength(1)
+    expect(records[0]!.kind).toBe('archive-skill')
+    expect(JSON.parse(await readFile(join(fx.home, '.claude.json'), 'utf-8')).mcpServers).toEqual({ a: { command: 'a' } })
+  })
+
+  it('--only with an unknown or not-appliable id errors with the valid ids and exit code 2', async () => {
+    const { fx, findings } = await threeFindingFixture()
+    const io = makeIo()
+    const prevExit = process.exitCode
+    try {
+      await runOptimizeApply([], undefined, applyOpts(fx, io, { findings, yes: true, only: 'read-edit-ratio' }))
+
+      expect(process.exitCode).toBe(2)
+      const err = io.stderr()
+      expect(err).toContain('read-edit-ratio')
+      expect(err).toContain('Appliable ids for this run:')
+      expect(err).toContain('mcp-low-coverage')
+      expect(await readRecords(fx.actionsDir)).toHaveLength(0)
+      expect(io.stdout()).not.toContain('No appliable config-class fixes')
+    } finally {
+      process.exitCode = prevExit
+    }
+  })
+
+  it('--yes skips claude-md plans with a reason unless explicitly selected via --only', async () => {
+    const { fx, findings } = await threeFindingFixture()
+    const claudeMdFinding = makeFinding('read-edit-ratio', { type: 'paste', destination: 'claude-md', label: '', text: 'Read first.' })
+    const io = makeIo()
+    await runOptimizeApply([], undefined, applyOpts(fx, io, { findings: [claudeMdFinding, ...findings], yes: true }))
+
+    expect(io.stdout()).toContain('Skipped read-edit-ratio: CLAUDE.md edits are not applied with --yes')
+    expect(existsSync(join(fx.project, 'CLAUDE.md'))).toBe(false)
+    expect((await readRecords(fx.actionsDir)).map(r => r.kind)).not.toContain('claude-md-rule')
+
+    const fx2 = await makeFixture()
+    const io2 = makeIo()
+    await runOptimizeApply([], undefined, applyOpts(fx2, io2, { findings: [claudeMdFinding], yes: true, only: 'read-edit-ratio' }))
+
+    expect((await readRecords(fx2.actionsDir)).map(r => r.kind)).toEqual(['claude-md-rule'])
+    expect(await readFile(join(fx2.project, 'CLAUDE.md'), 'utf-8')).toContain('<!-- codeburn:begin read-edit-ratio -->')
+  })
+
+  it('project-scope leaves unrelated projects[*] entries untouched and previews the cold removals', async () => {
+    const fx = await makeFixture()
+    const claudeJson = join(fx.home, '.claude.json')
+    const serverValue = { command: 'srv' }
+    await writeFile(claudeJson, JSON.stringify({
+      mcpServers: { srv: serverValue },
+      projects: {
+        '/cold/one': { mcpServers: { srv: serverValue } },
+        '/unrelated/proj': { mcpServers: { srv: serverValue, keepme: {} } },
+      },
+    }, null, 2) + '\n')
+    const keeper = join(fx.root, 'keeper')
+    await mkdir(keeper, { recursive: true })
+
+    const finding = makeFinding('mcp-project-scope', CMD_FIX, {
+      kind: 'mcp-project-scope',
+      servers: [{ server: 'srv', keepProjects: [keeper], removeProjects: ['/cold/one'] }],
+    })
+    const io = makeIo()
+    await runOptimizeApply([], undefined, applyOpts(fx, io, { findings: [finding], yes: true }))
+
+    expect(io.stdout()).toContain('(removes srv from 1 project entry: /cold/one)')
+
+    const after = JSON.parse(await readFile(claudeJson, 'utf-8'))
+    expect(after.mcpServers).toEqual({})
+    expect(after.projects['/cold/one'].mcpServers).toEqual({})
+    expect(after.projects['/unrelated/proj'].mcpServers).toEqual({ srv: serverValue, keepme: {} })
+    expect(JSON.parse(await readFile(join(keeper, '.mcp.json'), 'utf-8')).mcpServers).toEqual({ srv: serverValue })
+  })
+
+  it('surfaces parse-error notes when every plan resolves to null', async () => {
+    const fx = await makeFixture()
+    await writeFile(join(fx.home, '.claude.json'), 'not json{{{')
+    const finding = makeFinding('mcp-low-coverage', CMD_FIX, { kind: 'mcp-remove', servers: ['ghost'] })
+    const io = makeIo()
+    await runOptimizeApply([], undefined, applyOpts(fx, io, { findings: [finding], yes: true }))
+
+    const out = io.stdout()
+    expect(out).toContain('No appliable config-class fixes')
+    expect(out).toContain('could not parse')
+    expect(out).toContain('.claude.json')
+    expect(await readRecords(fx.actionsDir)).toHaveLength(0)
+  })
+
+  it('renders notes under manual findings alongside appliable ones', async () => {
+    const fx = await makeFixture()
+    await writeFile(join(fx.home, '.claude.json'), 'not json{{{')
+    await mkdir(join(fx.home, '.claude', 'skills', 'foo'), { recursive: true })
+    await writeFile(join(fx.home, '.claude', 'skills', 'foo', 'SKILL.md'), 'x')
+    const findings: WasteFinding[] = [
+      makeFinding('mcp-low-coverage', CMD_FIX, { kind: 'mcp-remove', servers: ['ghost'] }),
+      makeFinding('unused-skills', CMD_FIX, { kind: 'archive', names: ['foo'] }),
+    ]
+    const io = makeIo()
+    await runOptimizeApply([], undefined, applyOpts(fx, io, { findings, dryRun: true }))
+
+    const out = io.stdout()
+    expect(out).toContain('[mcp-low-coverage]  manual')
+    expect(out).toContain('could not parse')
   })
 })
