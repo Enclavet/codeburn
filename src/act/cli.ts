@@ -17,20 +17,25 @@ export function registerActCommands(program: Command): void {
     .description('List applied actions, newest first')
     .option('--json', 'Output the full records as JSON')
     .action(async (opts: { json?: boolean }) => {
-      const records = (await readRecords(defaultActionsDir())).reverse()
-      if (opts.json) {
-        console.log(JSON.stringify(records, null, 2))
-        return
+      try {
+        const records = (await readRecords(defaultActionsDir())).reverse()
+        if (opts.json) {
+          console.log(JSON.stringify(records, null, 2))
+          return
+        }
+        if (records.length === 0) {
+          console.log('No actions recorded yet.')
+          return
+        }
+        const rows = records.map(r => [shortId(r.id), formatWhen(r.at), r.description, r.status])
+        console.log(renderTable(
+          [{ header: 'ID' }, { header: 'When' }, { header: 'Description' }, { header: 'Status' }],
+          rows,
+        ))
+      } catch (err) {
+        console.error(err instanceof Error ? err.message : String(err))
+        process.exitCode = 1
       }
-      if (records.length === 0) {
-        console.log('No actions recorded yet.')
-        return
-      }
-      const rows = records.map(r => [shortId(r.id), formatWhen(r.at), r.description, r.status])
-      console.log(renderTable(
-        [{ header: 'ID' }, { header: 'When' }, { header: 'Description' }, { header: 'Status' }],
-        rows,
-      ))
     })
 
   act

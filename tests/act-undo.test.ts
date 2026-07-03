@@ -4,8 +4,9 @@ import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { runAction } from '../src/act/apply.js'
-import { readRecords } from '../src/act/journal.js'
+import { appendRecord, readRecords } from '../src/act/journal.js'
 import { DriftError, undoAction } from '../src/act/undo.js'
+import type { ActionRecord } from '../src/act/types.js'
 
 const roots: string[] = []
 
@@ -100,4 +101,133 @@ describe('undoAction', () => {
     expect(await readFile(p, 'utf-8')).toBe('original')
     expect((await readRecords(actionsDir))[0]!.status).toBe('undone')
   })
+
+  it('reverts changes newest-first so overlapping changes restore the original state', async () => {
+    const { actionsDir, files } = await makeRoot()
+    const src = join(files, 'a.txt')
+    const dest = join(files, 'b.txt')
+    await writeFile(src, 'orig')
+
+    const rec = await runAction({
+      kind: 'shell-config',
+      description: 'move then edit',
+      changes: [
+        { op: 'move', path: src, movedTo: dest },
+        { op: 'edit', path: dest, content: 'edited' },
+      ],
+    }, actionsDir)
+
+    await undoAction({ id: rec.id }, { actionsDir })
+    expect(await readFile(src, 'utf-8')).toBe('orig')
+    expect(existsSync(dest)).toBe(false)
+  })
+
+  it('refuses to undo a move when the original path is occupied, then --force overwrites', async () => {
+    const { actionsDir, files } = await makeRoot()
+    const src = join(files, 'a.txt')
+    const dest = join(files, 'b.txt')
+    await writeFile(src, 'moved-bytes')
+    const rec = await runAction({
+      kind: 'archive-skill', description: 'occupied', changes: [{ op: 'move', path: src, movedTo: dest }],
+    }, actionsDir)
+
+    await writeFile(src, 'squatter')
+
+    const err = await undoAction({ id: rec.id }, { actionsDir }).catch(e => e)
+    expect(err).toBeInstanceOf(DriftError)
+    expect((err as DriftError).drifted.some(d => d.includes(src))).toBe(true)
+
+    await undoAction({ id: rec.id }, { actionsDir, force: true })
+    expect(await readFile(src, 'utf-8')).toBe('moved-bytes')
+    expect(existsSync(dest)).toBe(false)
+  })
+
+  it('snapshots an existing move destination and restores both files on undo', async () => {
+    const { actionsDir, files } = await makeRoot()
+    const src = join(files, 'a.txt')
+    const dest = join(files, 'b.txt')
+    await writeFile(src, 'src-bytes')
+    await writeFile(dest, 'dest-bytes')
+
+    const rec = await runAction({
+      kind: 'archive-agent', description: 'move onto dest', changes: [{ op: 'move', path: src, movedTo: dest }],
+    }, actionsDir)
+    expect(rec.changes[0]!.destBackup).not.toBeNull()
+    expect(await readFile(dest, 'utf-8')).toBe('src-bytes')
+    expect(await readFile(join(actionsDir, rec.changes[0]!.destBackup!), 'utf-8')).toBe('dest-bytes')
+
+    await undoAction({ id: rec.id }, { actionsDir })
+    expect(await readFile(src, 'utf-8')).toBe('src-bytes')
+    expect(await readFile(dest, 'utf-8')).toBe('dest-bytes')
+  })
+
+  it('force-undo of a move whose moved file is gone restores from backup and flips status', async () => {
+    const { actionsDir, files } = await makeRoot()
+    const src = join(files, 'a.txt')
+    const dest = join(files, 'b.txt')
+    await writeFile(src, 'precious')
+    const rec = await runAction({
+      kind: 'archive-command', description: 'gone', changes: [{ op: 'move', path: src, movedTo: dest }],
+    }, actionsDir)
+
+    await rm(dest)
+
+    await expect(undoAction({ id: rec.id }, { actionsDir })).rejects.toBeInstanceOf(DriftError)
+    const undone = await undoAction({ id: rec.id }, { actionsDir, force: true })
+    expect(undone.status).toBe('undone')
+    expect(await readFile(src, 'utf-8')).toBe('precious')
+  })
+
+  it('undoing a create that overwrote an existing file restores the prior bytes', async () => {
+    const { actionsDir, files } = await makeRoot()
+    const p = join(files, 'exists.txt')
+    await writeFile(p, 'prior')
+
+    const rec = await runAction({
+      kind: 'guard-install', description: 'create over existing', changes: [{ op: 'create', path: p, content: 'new' }],
+    }, actionsDir)
+    expect(rec.changes[0]!.backup).not.toBeNull()
+
+    await undoAction({ id: rec.id }, { actionsDir })
+    expect(await readFile(p, 'utf-8')).toBe('prior')
+  })
+
+  it('undoes a plan that touches the same path twice back to the original bytes', async () => {
+    const { actionsDir, files } = await makeRoot()
+    const p = join(files, 'twice.txt')
+    await writeFile(p, 'v0')
+
+    const rec = await runAction({
+      kind: 'claude-md-rule',
+      description: 'same path twice',
+      changes: [
+        { op: 'edit', path: p, content: 'v1' },
+        { op: 'edit', path: p, content: 'v2' },
+      ],
+    }, actionsDir)
+    expect(rec.changes[0]!.afterHash).toBe(rec.changes[1]!.afterHash)
+
+    await undoAction({ id: rec.id }, { actionsDir })
+    expect(await readFile(p, 'utf-8')).toBe('v0')
+  })
+
+  it('rejects an ambiguous id prefix with the match count', async () => {
+    const { actionsDir } = await makeRoot()
+    await appendRecord(actionsDir, bareRecord('aaaaaaaa-1111-4111-8111-111111111111', 'one'))
+    await appendRecord(actionsDir, bareRecord('aaaaaaaa-2222-4222-8222-222222222222', 'two'))
+
+    await expect(undoAction({ id: 'aaaaaaaa' }, { actionsDir })).rejects.toThrow(/matches 2 actions/)
+  })
 })
+
+function bareRecord(id: string, description: string): ActionRecord {
+  return {
+    id,
+    at: new Date().toISOString(),
+    kind: 'mcp-remove',
+    findingId: null,
+    description,
+    changes: [],
+    status: 'applied',
+  }
+}

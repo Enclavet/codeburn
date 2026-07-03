@@ -10,6 +10,7 @@ export type FileChange = {
   backup: string | null   // backups/<id>/<n>.bak relative to the actions dir, null if the file did not exist before
   op: 'edit' | 'create' | 'move'
   movedTo?: string        // for op: 'move' (archives)
+  destBackup?: string | null  // move ops: snapshot of a file that already existed at movedTo
   afterHash: string       // sha256 of the post-apply bytes, checked for drift on undo
 }
 

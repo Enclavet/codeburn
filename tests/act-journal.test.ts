@@ -1,6 +1,7 @@
 import { afterAll, describe, expect, it } from 'vitest'
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, rm, utimes, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { runAction } from '../src/act/apply.js'
@@ -124,6 +125,77 @@ describe('runAction journaling', () => {
     expect(only.changes[0]!.backup).not.toBeNull()
     expect(typeof only.changes[0]!.afterHash).toBe('string')
   })
+})
+
+describe('action lock', () => {
+  it('refuses to run while a fresh foreign lock is held', async () => {
+    const { actionsDir, files } = await makeRoot()
+    await mkdir(actionsDir, { recursive: true })
+    await writeFile(join(actionsDir, '.lock'), '')
+    const target = join(files, 'blocked.txt')
+
+    await expect(runAction({
+      kind: 'shell-config',
+      description: 'blocked by lock',
+      changes: [{ op: 'create', path: target, content: 'x' }],
+    }, actionsDir)).rejects.toThrow(/in progress/)
+
+    expect(existsSync(target)).toBe(false)
+  })
+
+  it('takes over a lock whose mtime is older than 60s', async () => {
+    const { actionsDir, files } = await makeRoot()
+    await mkdir(actionsDir, { recursive: true })
+    const lock = join(actionsDir, '.lock')
+    await writeFile(lock, JSON.stringify({ pid: 1, at: 0 }))
+    const past = new Date(Date.now() - 61_000)
+    await utimes(lock, past, past)
+    const target = join(files, 'takeover.txt')
+
+    const rec = await runAction({
+      kind: 'shell-config',
+      description: 'stale takeover',
+      changes: [{ op: 'create', path: target, content: 'x' }],
+    }, actionsDir)
+
+    expect(rec.status).toBe('applied')
+    expect(await readFile(target, 'utf-8')).toBe('x')
+    expect(existsSync(lock)).toBe(false)
+  })
+})
+
+describe('act list --json (CLI)', () => {
+  it('prints full records as JSON, newest first', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'codeburn-act-cli-'))
+    roots.push(home)
+    const actionsDir = join(home, '.config', 'codeburn', 'actions')
+    const files = join(home, 'work')
+    await mkdir(files, { recursive: true })
+    const p1 = join(files, 'a.txt')
+    const p2 = join(files, 'b.txt')
+    await writeFile(p1, 'a')
+    await writeFile(p2, 'b')
+    const recOlder = await runAction({
+      kind: 'mcp-remove', description: 'older', changes: [{ op: 'edit', path: p1, content: 'a2' }],
+    }, actionsDir)
+    const recNewer = await runAction({
+      kind: 'mcp-remove', description: 'newer', changes: [{ op: 'edit', path: p2, content: 'b2' }],
+    }, actionsDir)
+
+    const res = spawnSync(process.execPath, ['--import', 'tsx', 'src/cli.ts', 'act', 'list', '--json'], {
+      cwd: process.cwd(),
+      env: { ...process.env, HOME: home, USERPROFILE: home, HOMEPATH: home, HOMEDRIVE: '' },
+      encoding: 'utf-8',
+    })
+
+    expect(res.status).toBe(0)
+    const parsed = JSON.parse(res.stdout) as ActionRecord[]
+    expect(parsed.map(r => r.id)).toEqual([recNewer.id, recOlder.id])
+    expect(parsed[0]).toMatchObject({ kind: 'mcp-remove', description: 'newer', status: 'applied', findingId: null })
+    expect(parsed[0]!.changes[0]).toMatchObject({ path: p2, op: 'edit' })
+    expect(typeof parsed[0]!.changes[0]!.afterHash).toBe('string')
+    expect(parsed[0]!.changes[0]!.backup).not.toBeNull()
+  }, 20_000)
 })
 
 function sampleRecord(id: string, description: string): ActionRecord {

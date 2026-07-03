@@ -1,4 +1,4 @@
-import { appendFile, mkdir, open, readFile, rm } from 'fs/promises'
+import { appendFile, mkdir, readFile, rm, stat, writeFile } from 'fs/promises'
 import { dirname, join } from 'path'
 import { getConfigFilePath } from '../config.js'
 import type { ActionRecord } from './types.js'
@@ -29,8 +29,9 @@ export async function readRecords(actionsDir: string): Promise<ActionRecord[]> {
   let raw: string
   try {
     raw = await readFile(journalPath(actionsDir), 'utf-8')
-  } catch {
-    return []
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return []
+    throw err
   }
   const order: string[] = []
   const byId = new Map<string, ActionRecord>()
@@ -58,20 +59,22 @@ function lockPath(actionsDir: string): string {
 async function acquireLock(lock: string): Promise<void> {
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      const fh = await open(lock, 'wx')
-      await fh.writeFile(JSON.stringify({ pid: process.pid, at: Date.now() }))
-      await fh.close()
+      // A single wx write: the lock is never observable in an empty state, so
+      // a freshly taken lock cannot be stolen as stale.
+      await writeFile(lock, JSON.stringify({ pid: process.pid, at: Date.now() }), { flag: 'wx' })
       return
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err
-      let stale = true
+      let mtimeMs: number
       try {
-        const held = JSON.parse(await readFile(lock, 'utf-8')) as { at?: number }
-        stale = typeof held.at !== 'number' || Date.now() - held.at > LOCK_STALE_MS
-      } catch {
-        stale = true // an unreadable lock is treated as stale
+        mtimeMs = (await stat(lock)).mtimeMs
+      } catch (statErr) {
+        if ((statErr as NodeJS.ErrnoException).code !== 'ENOENT') throw statErr
+        continue // holder released between write and stat; retry
       }
-      if (!stale) throw new Error('another codeburn action is in progress (lock held); retry shortly')
+      if (Date.now() - mtimeMs <= LOCK_STALE_MS) {
+        throw new Error('another codeburn action is in progress (lock held); retry shortly')
+      }
       await rm(lock, { force: true })
     }
   }
