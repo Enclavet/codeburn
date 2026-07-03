@@ -1977,6 +1977,12 @@ function estimateLowWorthRecoverableTokens(
   return Math.round(tokens * fraction)
 }
 
+// Session-opener texts, the single source of truth shared by the optimize
+// findings below and by `codeburn guard` (SessionStart hook). Kept as
+// constants so the two surfaces can never drift.
+export const LOW_WORTH_OPENER = 'Before continuing, name the deliverable in one sentence (PR title, file changed, command output you expect). Stop and check with me if (a) you spend more than 10 minutes without an edit, or (b) the same approach fails twice. Do not retry past two attempts on any single fix.'
+export const CONTEXT_HEAVY_OPENER = 'Start fresh before continuing. Use only the current goal, the relevant files, the failing command/output, and the constraints below. Restate the working context in under 10 bullets before editing.'
+
 export type LowWorthCandidate = {
   project: string
   sessionId: string
@@ -2071,7 +2077,7 @@ export function detectLowWorthSessions(projects: ProjectSummary[]): WasteFinding
       type: 'paste',
       destination: 'session-opener',
       label: 'Paste at the start of your NEXT expensive thread (one-time, do not add to CLAUDE.md):',
-      text: 'Before continuing, name the deliverable in one sentence (PR title, file changed, command output you expect). Stop and check with me if (a) you spend more than 10 minutes without an edit, or (b) the same approach fails twice. Do not retry past two attempts on any single fix.',
+      text: LOW_WORTH_OPENER,
     },
   }
 }
@@ -2185,7 +2191,7 @@ export function detectContextBloat(projects: ProjectSummary[], excludedSessionId
       type: 'paste',
       destination: 'session-opener',
       label: 'Paste at the start of your NEXT expensive thread (one-time, do not add to CLAUDE.md):',
-      text: 'Start fresh before continuing. Use only the current goal, the relevant files, the failing command/output, and the constraints below. Restate the working context in under 10 bullets before editing.',
+      text: CONTEXT_HEAVY_OPENER,
     },
   }
 }

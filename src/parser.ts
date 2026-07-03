@@ -1081,7 +1081,7 @@ function applyLocalModelSavings(call: ParsedApiCall): ParsedApiCall {
   }
 }
 
-function parseApiCall(entry: JournalEntry): ParsedApiCall | null {
+export function parseApiCall(entry: JournalEntry): ParsedApiCall | null {
   if (entry.type !== 'assistant') return null
   const msg = entry.message as AssistantMessageContent | undefined
   if (!msg?.usage || !msg?.model) return null
