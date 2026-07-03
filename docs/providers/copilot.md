@@ -92,6 +92,18 @@ Sidecar records that plan/agent mode also writes — `Thinking` (chain-of-though
 **not** billable assistant output and are deliberately skipped. User prompts are
 the simpler `{"<uuid>":{"type":"Value",…}}` value-maps.
 
+**Old plugin format (≤1.5.x, e.g. 1.5.59-243).** Older plugins do not write
+per-turn `__first__`/Subgraph blobs at all — they store the whole session as ONE
+binary-framed outer Nitrite document of UUID-keyed `Value` entries, with the
+`AgentRound` records one escaping level deeper. When the Subgraph scan finds no
+turns but the raw file contains `AgentRound` text, a fallback locates that outer
+document (`extractJetBrainsDbTurns`), runs it through the same
+`extractResponseText` depth-unescape, and emits **one session-level call** per
+document (all rounds' replies joined). Cost and tokens are correct; only the
+per-turn call-count granularity is coarser than the new format — an accepted
+tradeoff for legacy data. The fallback is gated on the new-format scan yielding
+nothing, so current sessions are never affected or double-counted.
+
 (Store dirs may also contain a legacy `00000000000.xd` Xodus log from older
 plugin versions. On every installation observed it is either empty or shadowed
 by the `.db`, so CodeBurn reads only the `.db`. If a real `.xd`-only session ever

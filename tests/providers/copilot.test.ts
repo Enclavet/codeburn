@@ -1657,4 +1657,101 @@ describe('copilot provider - JetBrains parsing', () => {
     const src = sessions.find((s) => (s as { storeId?: string }).storeId === 'conv-utf8name')!
     expect((src as { projectName?: string }).projectName).toBe(name)
   })
+
+  // ---------------------------------------------------------------------------
+  // Old plugin format (≤1.5.x, e.g. 1.5.59-243)
+  // ---------------------------------------------------------------------------
+  // In the old plugin all session turns live inside ONE large binary-framed
+  // outer Nitrite document. Each turn's response is stored as a UUID-keyed
+  // Value entry containing an AgentRound record (one escaping level deeper than
+  // the __first__/Subgraph format used by plugins ≥1.12.x).
+
+  /**
+   * Build an outer Nitrite document in the old plugin format.
+   * The document is preceded by a single binary byte (0x81) and starts with a
+   * UUID-keyed Value entry. Each AgentRound is stored as a Value whose value
+   * field is a JSON string containing {\"type\":\"AgentRound\",\"data\":\"...\"}
+   * (one level of JSON-string escaping from the document root).
+   */
+  function jbOldFormatDoc(rounds: Array<{ reply: string; model?: string }>, opts: { upperUuid?: boolean } = {}) {
+    const cased = (u: string) => (opts.upperUuid ? u.toUpperCase() : u)
+    const entries: Record<string, unknown> = {}
+    // Lead entry (mimics the References record always present in real DBs)
+    entries[cased('0f383f5c-f169-4fee-9115-c06d4dd8985f')] = {
+      type: 'Value',
+      value: JSON.stringify({ type: 'References', data: '[]' }),
+    }
+    rounds.forEach((r, i) => {
+      const uuid = cased(`ccadf30b-fa34-4387-9f14-0a5f63457d${String(i).padStart(2, '0')}`)
+      const agentRoundData = JSON.stringify({ roundId: i + 1, reply: r.reply, toolCalls: [] })
+      const agentRoundValue = JSON.stringify({ type: 'AgentRound', data: agentRoundData })
+      entries[uuid] = { type: 'Value', value: agentRoundValue }
+      if (r.model) {
+        const modelUuid = cased(`bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbb${String(i).padStart(4, '0')}`)
+        entries[modelUuid] = { type: 'Value', value: `{"model":"${r.model}"}` }
+      }
+    })
+    // Binary framing byte (0x81) followed by the JSON document
+    return '\x81' + JSON.stringify(entries)
+  }
+
+  it('parses agent turns from old plugin format (≤1.5.x, no __first__ blobs)', async () => {
+    // The old plugin stores all turns in one big outer Nitrite document with a
+    // binary framing byte. The fallback path must find and parse it.
+    const convGuid = '17a5d71b-27f7-4937-8803-7fc2cbb705cb'
+    const convRecord = jbConversationRecord(convGuid, 'Understanding HBase Architecture')
+    const oldFormatContent =
+      'H:2,block:8,blockSize:1000,format:3\n' +
+      'com.github.copilot.agent.session.persistence.nitrite.entity.NtAgentTurn\n' +
+      convRecord + '\n' +
+      jbOldFormatDoc([
+        { reply: "I'll scan the repository to find the top-level project structure.", model: 'gpt-4.1' },
+        { reply: "Now I'll open the README to explain architecture." },
+        { reply: '' }, // empty reply (pure tool-call round) — must not produce a call
+      ])
+
+    const dbPath = await createJetBrainsDb(tmpDir, 'iu', 'chat-agent-sessions', 'old-fmt-1', oldFormatContent)
+    const calls = await collectCalls(jbDbSource(dbPath, 'old-fmt-1'))
+
+    // The fallback emits one call per outer document (all replies joined).
+    expect(calls).toHaveLength(1)
+    expect(calls[0]!.costIsEstimated).toBe(true)
+    // The two NON-EMPTY rounds are captured and joined; the empty (tool-call)
+    // round contributes nothing. Assert the exact combined token count so the
+    // test fails if either reply is dropped or the empty round leaks in.
+    const joined =
+      "I'll scan the repository to find the top-level project structure.\n" +
+      "Now I'll open the README to explain architecture."
+    expect(calls[0]!.outputTokens).toBe(Math.ceil(joined.length / 4))
+    // The session label is the conversation TITLE, not the reply text.
+    expect(calls[0]!.userMessage).toBe('Understanding HBase Architecture')
+  })
+
+  it('parses old plugin format when the outer-doc UUIDs are uppercase hex', async () => {
+    // The outer-doc detection must be case-insensitive: an uppercase UUID must
+    // not make the whole session fall through to $0.
+    const convRecord = jbConversationRecord('27b6e82c-38f8-4048-9914-8fd3dcc816dc', 'Conv Upper')
+    const content =
+      'H:2,block:8,blockSize:1000,format:3\n' +
+      'com.github.copilot.agent.session.persistence.nitrite.entity.NtAgentTurn\n' +
+      convRecord + '\n' +
+      jbOldFormatDoc([{ reply: 'An uppercase-UUID reply with enough words to score.' }], { upperUuid: true })
+    const dbPath = await createJetBrainsDb(tmpDir, 'iu', 'chat-agent-sessions', 'old-fmt-upper', content)
+    const calls = await collectCalls(jbDbSource(dbPath, 'old-fmt-upper'))
+    expect(calls).toHaveLength(1)
+    expect(calls[0]!.outputTokens).toBeGreaterThan(0)
+  })
+
+  it('old plugin format: does not parse when __first__ blobs already yield turns (no double-count)', async () => {
+    // When the newer __first__/Subgraph path finds turns, the old-format fallback
+    // must not run (turns.length > 0 prevents it).
+    const content = jbDbContent([
+      jbAgentBlob(['A reply from the new format.']),
+    ])
+    const dbPath = await createJetBrainsDb(tmpDir, 'iu', 'chat-agent-sessions', 'new-fmt-guard', content)
+    const calls = await collectCalls(jbDbSource(dbPath, 'new-fmt-guard'))
+    // Only the one Subgraph-format turn — no old-format duplicates
+    expect(calls).toHaveLength(1)
+    expect(calls[0]!.outputTokens).toBeGreaterThan(0)
+  })
 })

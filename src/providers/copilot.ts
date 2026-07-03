@@ -1301,6 +1301,78 @@ function extractJetBrainsDbTurns(raw: string): JBDbTurn[] {
     turns.push({ replyText, model, errored: false, conversationId, conversationTitle, conversationProject })
   }
 
+  // ---------------------------------------------------------------------------
+  // Fallback: old JetBrains Copilot plugin format (≤1.5.x, e.g. 1.5.59-243)
+  // ---------------------------------------------------------------------------
+  // In this format ALL session turns are stored inside ONE large outer Nitrite
+  // document — a binary-framed JSON object with UUID-keyed Value entries — rather
+  // than the per-turn {"__first__":{"type":"Subgraph",...}} blobs used by newer
+  // plugins (≥1.12.x). The AgentRound entries sit one escaping level deeper
+  // inside the outer document's string values, so `extractResponseText`'s
+  // depth-unescape loop handles extraction correctly once we feed it the right
+  // chunk. MVStore keeps two identical copies of the collection; `seenReplies`
+  // deduplicates them automatically.
+  //
+  // Detection heuristic: the __first__/Subgraph path produced no turns AND the
+  // raw file contains bare 'AgentRound' text (meaning old-format data is present).
+  if (turns.length === 0 && raw.includes('AgentRound')) {
+    // The outer Nitrite document is preceded by a single binary framing byte
+    // (0x81 in practice, but any non-printable/non-ASCII byte in MVStore).
+    // It starts with a UUID-keyed Value entry: {"<uuid>":{"type":"Value",...}}.
+    // Hex is matched case-insensitively — an uppercase UUID must not cause the
+    // whole session to fall through to $0 (the exact bug this path fixes).
+    const outerDocRe = /[\x00-\x1f\x7f-\xff]\{"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}":\{"type":"Value"/g
+    let dm: RegExpExecArray | null
+    while ((dm = outerDocRe.exec(raw))) {
+      // Skip the leading binary byte; matchJsonObject starts at the '{'.
+      const docStart = dm.index + 1
+      const { chunk, end } = matchJsonObject(raw, docStart)
+      outerDocRe.lastIndex = end
+
+      // Skip documents that contain no AgentRound data (e.g. empty sessions).
+      if (!chunk.includes('AgentRound')) continue
+
+      // Attribute to the conversation whose GUID most recently precedes this doc.
+      let conversationId = ''
+      let conversationTitle = ''
+      let bestPos = -1
+      for (const c of convById.values()) {
+        const p = raw.lastIndexOf(c.id, docStart)
+        if (p > bestPos) {
+          bestPos = p
+          conversationId = c.id
+          conversationTitle = c.title
+        }
+      }
+
+      // extractResponseText handles the depth-1 unescape needed to surface the
+      // AgentRound records, then calls extractAgentRoundReplies for each turn.
+      // Because the outer document holds ALL turns in one blob we get back a
+      // single joined string; split it on the '\n' join to yield per-turn texts.
+      const allReplies = extractResponseText(chunk)
+      if (!allReplies) continue
+
+      const conversationProject = inferJetBrainsProject(chunk) ?? ''
+      const storeModel = findJetBrainsModelToken(chunk)
+
+      // extractResponseText joins multiple replies with '\n'. Since individual
+      // replies can themselves span multiple lines we cannot cleanly split here —
+      // instead we emit one ParsedProviderCall per outer document (one session).
+      const dedupeKey = `${conversationId}::${allReplies}`
+      if (seenReplies.has(dedupeKey)) continue
+      seenReplies.add(dedupeKey)
+
+      turns.push({
+        replyText: allReplies,
+        model: storeModel,
+        errored: false,
+        conversationId,
+        conversationTitle,
+        conversationProject,
+      })
+    }
+  }
+
   // A project derived from ANY turn of a conversation applies to all its turns
   // (the files are usually referenced in the first substantive turn only).
   const projByConv = new Map<string, string>()
