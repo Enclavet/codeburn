@@ -46,6 +46,12 @@ private struct GeneralSettingsTab: View {
     @State private var costText = ""
     @State private var tokenText = ""
 
+    // AppStorage (not a computed Binding over UsageRefreshCadence.current):
+    // a plain UserDefaults write does not invalidate the view, so the picker
+    // label would never reflect the selection even though the value landed.
+    @AppStorage(UsageRefreshCadence.defaultsKey)
+    private var usageRefreshSeconds: Int = UsageRefreshCadence.default.rawValue
+
     private let costPresets: Set<Double> = [25, 50, 100, 200, 500]
     private let tokenPresets: Set<Double> = [1_000_000, 5_000_000, 10_000_000, 25_000_000, 50_000_000, 100_000_000]
 
@@ -124,8 +130,8 @@ private struct GeneralSettingsTab: View {
 
             Section("Usage Refresh") {
                 Picker("Update every", selection: Binding(
-                    get: { UsageRefreshCadence.current },
-                    set: { UsageRefreshCadence.current = $0 }
+                    get: { UsageRefreshCadence(rawValue: usageRefreshSeconds) ?? .default },
+                    set: { usageRefreshSeconds = $0.rawValue }
                 )) {
                     ForEach(UsageRefreshCadence.allCases) { cadence in
                         Text(cadence.label).tag(cadence)
