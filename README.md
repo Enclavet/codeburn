@@ -275,6 +275,14 @@ defaults write org.agentseal.codeburn-menubar CodeBurnMenubarCompact -bool true
 
 Relaunch the app to apply. To revert: `defaults delete org.agentseal.codeburn-menubar CodeBurnMenubarCompact`.
 
+**Refresh cadence** is set in Settings under Usage Refresh. Auto (the default) refreshes every 30 seconds on AC power and backs off on battery, in Low Power Mode, and while the display sleeps; fixed 1, 5, or 15 minute cadences and a Manual mode (refresh only when you open the popover or click Refresh Now) are also available. From Terminal:
+
+```bash
+defaults write org.agentseal.codeburn-menubar CodeBurnMenubarRefreshSeconds -int 300
+```
+
+Seconds between refreshes: `60`, `300`, or `900`; `0` is Manual and `-1` is Auto. Takes effect on the next refresh tick, no relaunch needed.
+
 ### Linux (GNOME)
 
 Linux gets the same ambient view through a GNOME Shell extension (GNOME 45+): spend in the top panel, period switcher, compact mode, and daily budget alerts. It lives in [`gnome/`](gnome/):
