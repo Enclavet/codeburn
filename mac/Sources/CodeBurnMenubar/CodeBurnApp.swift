@@ -573,9 +573,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         // and never auto-spawning in Manual (#647).
         let interval = currentRefreshInterval()
         let intervalElapsed = interval.map { sinceLast >= $0 } ?? false
+        // Stuck-refresh cleanup may retrigger a spawn only when the cadence
+        // allows auto-spawns at all: in Manual mode the stale state is
+        // cleared and the next user interaction fetches fresh.
+        let recoveryRespawnAllowed = interval != nil
         let shouldForceRefresh = forcePayload ||
-            clearedStaleForceRefresh ||
-            clearedStaleLoading ||
+            ((clearedStaleForceRefresh || clearedStaleLoading) && recoveryRespawnAllowed) ||
             intervalElapsed
 
         if shouldForceRefresh {
