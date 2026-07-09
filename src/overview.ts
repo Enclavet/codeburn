@@ -4,7 +4,7 @@ import { homedir } from 'os'
 
 import { CATEGORY_LABELS, type ProjectSummary, type TaskCategory } from './types.js'
 import { formatCost as baseCost } from './currency.js'
-import { getShortModelName } from './models.js'
+import { findUnpricedModels, getShortModelName } from './models.js'
 import { dateKey } from './day-aggregator.js'
 
 // Display-only helpers. The shared formatters omit thousands separators and
@@ -160,6 +160,17 @@ export function renderOverview(
   out.push(kv('Calls', formatCount(calls) + c.dim('   sessions ') + formatCount(sessions)))
   out.push(kv('Cache hit', `${cacheHit.toFixed(1)}%`))
   if (savings > 0) out.push(kv('Savings', formatCost(savings) + c.dim(' (local models)')))
+  const unpriced = findUnpricedModels(
+    [...byModel.entries()].map(([model, d]) => ({ model, calls: d.calls, cost: d.cost, tokens: d.tokens })),
+  )
+  if (unpriced.length > 0) {
+    const shown = unpriced.slice(0, 3)
+      .map((u) => `${u.model} (${formatTokens(u.tokens)} tok)`)
+      .join(', ')
+    const more = unpriced.length > 3 ? ` +${unpriced.length - 3} more` : ''
+    out.push(kv('Unpriced', c.yellow(`${unpriced.length} model${unpriced.length === 1 ? '' : 's'} at $0: `) + shown + more))
+    out.push(kv('', c.dim('Fix: codeburn model-alias "<model>" <known-model>')))
+  }
   out.push('')
 
   // Tokens breakdown: input / output / cache in (written) / cache out (read)

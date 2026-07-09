@@ -21,6 +21,10 @@ export type PeriodData = {
   codexCredits?: number
   categories: Array<{ name: string; cost: number; savingsUSD: number; turns: number; editTurns: number; oneShotTurns: number }>
   models: Array<{ name: string; cost: number; savingsUSD: number; calls: number }>
+  /// Models with usage in the period whose pricing lookup fails against the
+  /// current tables (#638): their calls contribute $0 to `cost`. Optional so
+  /// PeriodData producers that predate the field keep compiling.
+  unpricedModels?: Array<{ model: string; calls: number; tokens: number }>
   projects?: Array<{ name: string; cost: number; savingsUSD: number; sessions: number; sessionDetails?: Array<{ cost: number; savingsUSD: number; calls: number; inputTokens: number; outputTokens: number; date: string; models: Array<{ name: string; cost: number; savingsUSD: number }> }> }>
   modelEfficiency?: Array<{ name: string; costPerEdit: number | null; oneShotRate: number | null }>
   topSessions?: Array<{ project: string; cost: number; savingsUSD: number; calls: number; date: string }>
@@ -140,6 +144,10 @@ export type MenubarPayload = {
       savingsBaselineModel: string
       calls: number
     }>
+    /// See PeriodData.unpricedModels: usage priced at $0 for lack of pricing
+    /// data. Empty when every model in the period resolved a price. Optional
+    /// so payload producers that predate the field stay source-compatible.
+    unpricedModels?: Array<{ model: string; calls: number; tokens: number }>
     /// Local-model savings rollup, distinct from the routing-waste /
     /// optimize savings concepts which describe hypothetical optimization
     /// opportunities. This block tracks counterfactual spend that was
@@ -368,6 +376,7 @@ export function buildMenubarPayload(
       codexCredits: current.codexCredits ?? 0,
       topActivities: buildTopActivities(current.categories),
       topModels: buildTopModels(current.models),
+      unpricedModels: current.unpricedModels ?? [],
       localModelSavings: breakdowns?.localModelSavings ?? { totalUSD: 0, calls: 0, byModel: [], byProvider: [] },
       providers: buildProviders(providers),
       topProjects: buildTopProjects(current.projects ?? []),

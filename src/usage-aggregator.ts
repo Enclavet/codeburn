@@ -2,7 +2,7 @@ import { homedir } from 'node:os'
 import { CATEGORY_LABELS, type ProjectSummary, type TaskCategory, type DateRange } from './types.js'
 import { type PeriodData, type ProviderCost, type BreakdownArrays, type MenubarPayload, buildMenubarPayload } from './menubar-json.js'
 import { parseAllSessions, filterProjectsByName, filterProjectsByDays } from './parser.js'
-import { getLocalModelSavingsConfigHash, getPriceOverridesConfigHash, getShortModelName } from './models.js'
+import { findUnpricedModels, getLocalModelSavingsConfigHash, getPriceOverridesConfigHash, getShortModelName } from './models.js'
 import { getAllProviders } from './providers/index.js'
 import { aggregateProjectsIntoDays, buildPeriodDataFromDays } from './day-aggregator.js'
 import { aggregateModelEfficiency } from './model-efficiency.js'
@@ -13,7 +13,7 @@ import { getDaysInRange, ensureCacheHydrated, loadDailyCache, emptyCache, BACKFI
 export function buildPeriodData(label: string, projects: ProjectSummary[]): PeriodData {
   const sessions = projects.flatMap(p => p.sessions)
   const catTotals: Record<string, { turns: number; cost: number; savingsUSD: number; editTurns: number; oneShotTurns: number }> = {}
-  const modelTotals: Record<string, { calls: number; cost: number; savingsUSD: number }> = {}
+  const modelTotals: Record<string, { calls: number; cost: number; savingsUSD: number; tokens: number }> = {}
   let inputTokens = 0, outputTokens = 0, cacheReadTokens = 0, cacheWriteTokens = 0
 
   for (const sess of sessions) {
@@ -30,10 +30,11 @@ export function buildPeriodData(label: string, projects: ProjectSummary[]): Peri
       catTotals[cat].oneShotTurns += d.oneShotTurns
     }
     for (const [model, d] of Object.entries(sess.modelBreakdown)) {
-      if (!modelTotals[model]) modelTotals[model] = { calls: 0, cost: 0, savingsUSD: 0 }
+      if (!modelTotals[model]) modelTotals[model] = { calls: 0, cost: 0, savingsUSD: 0, tokens: 0 }
       modelTotals[model].calls += d.calls
       modelTotals[model].cost += d.costUSD
       modelTotals[model].savingsUSD += d.savingsUSD
+      modelTotals[model].tokens += d.tokens.inputTokens + d.tokens.outputTokens + d.tokens.cacheReadInputTokens + d.tokens.cacheCreationInputTokens
     }
   }
 
@@ -49,7 +50,9 @@ export function buildPeriodData(label: string, projects: ProjectSummary[]): Peri
       .map(([cat, d]) => ({ name: CATEGORY_LABELS[cat as TaskCategory] ?? cat, ...d })),
     models: Object.entries(modelTotals)
       .sort(([, a], [, b]) => b.cost - a.cost)
-      .map(([name, d]) => ({ name, ...d })),
+      .map(([name, d]) => ({ name, calls: d.calls, cost: d.cost, savingsUSD: d.savingsUSD })),
+    unpricedModels: findUnpricedModels(Object.entries(modelTotals)
+      .map(([model, d]) => ({ model, calls: d.calls, cost: d.cost, tokens: d.tokens }))),
   }
 }
 

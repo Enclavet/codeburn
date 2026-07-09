@@ -34,8 +34,11 @@ Everything runs locally. No wrapper, no proxy, no API keys, nothing leaves your 
 <p align="center">
   <a href="#quick-start">Quick start</a> ·
   <a href="#find-and-fix-waste">Find waste</a> ·
+  <a href="#apply-fixes-undo-anytime">Apply fixes</a> ·
+  <a href="#guard-your-budget">Guard</a> ·
   <a href="#compare-models">Compare models</a> ·
   <a href="#track-what-shipped">Track what shipped</a> ·
+  <a href="#codeburn-in-your-agent-mcp">MCP</a> ·
   <a href="#supported-tools">Supported tools</a> ·
   <a href="#commands">Commands</a> ·
   <a href="#features">Features</a> ·
@@ -65,6 +68,8 @@ Also runs via `bunx codeburn` or `dx codeburn`, or `brew install codeburn` on ma
 ```bash
 codeburn menubar
 ```
+
+On Linux, a GNOME Shell extension gives the same panel view; see [Linux (GNOME)](#linux-gnome).
 
 Requires **Node.js 22.13+** and at least one supported tool with session data on disk. For Cursor and OpenCode, `better-sqlite3` installs automatically.
 
@@ -130,6 +135,39 @@ codeburn optimize --format json         # setup health + findings as JSON
 Each finding shows the estimated token and dollar savings plus a ready-to-paste fix: a `CLAUDE.md` line, an environment variable, or a `mv` command to archive unused items. Findings are ranked by urgency (impact weighted against observed waste) and rolled up into an A to F setup health grade. Repeat runs classify each finding as new, improving, or resolved against a 48-hour recent window.
 
 You can also open it inline from the dashboard: press `o` when a finding count appears in the status bar, `b` to return.
+
+## Apply fixes, undo anytime
+
+```bash
+codeburn optimize --apply             # review and apply fixes interactively
+codeburn optimize --apply --dry-run   # print the plan, change nothing
+codeburn optimize --apply --yes       # apply every appliable fix without prompting
+codeburn act list                     # every change CodeBurn has made
+codeburn act undo --last              # roll the most recent change back
+codeburn act report                   # realized vs estimated savings
+```
+
+`codeburn optimize` finds the waste; `--apply` fixes the config-class findings for you: settings values, environment variables, archiving unused agents and skills. Every change is backed up and journaled before it lands. `codeburn act list` shows the history and `codeburn act undo <id>` restores the original files (it refuses if the files changed since being applied, unless you pass `--force`).
+
+The loop closes on honesty: once an applied fix is at least 3 days old, `codeburn act report` compares its estimated savings against what your sessions actually did, and later `codeburn optimize` runs show that realized figure in the header. Estimates get checked against reality, not just claimed.
+
+## Guard your budget
+
+```bash
+codeburn guard install            # hooks into this project's .claude/settings.json
+codeburn guard install --global   # or into ~/.claude/settings.json
+codeburn guard status             # caps, install locations, flagged projects
+codeburn guard uninstall          # removes cleanly, leaves your own hooks alone
+```
+
+Guard installs opt-in hooks into Claude Code that watch session cost while you work:
+
+- **Soft cap** (default $5): a one-time in-session warning when a session passes it.
+- **Hard cap** (default $15): stops the session; `codeburn guard allow` lifts it for that session only.
+- **Checkpoint** (default $3): if a session ends past this with no edits and no commits, a nudge suggests starting fresh with a named deliverable.
+- **Session openers**: projects where optimize found waste get a one-line flag at session start.
+
+Caps are edited in `~/.config/codeburn/guard.json` (set a value to `null` to disable it). Add `--statusline` to show session cost in the Claude Code status line. Installs go through the same journal as everything else, so `codeburn act undo` removes them too. Hooks fail open: a broken guard never blocks a session.
 
 ## Compare models
 
@@ -237,6 +275,33 @@ defaults write org.agentseal.codeburn-menubar CodeBurnMenubarCompact -bool true
 
 Relaunch the app to apply. To revert: `defaults delete org.agentseal.codeburn-menubar CodeBurnMenubarCompact`.
 
+### Linux (GNOME)
+
+Linux gets the same ambient view through a GNOME Shell extension (GNOME 45+): spend in the top panel, period switcher, compact mode, and daily budget alerts. It lives in [`gnome/`](gnome/):
+
+```bash
+git clone https://github.com/getagentseal/codeburn && cd codeburn/gnome
+./install.sh
+gnome-extensions enable codeburn@codeburn.dev
+```
+
+See [gnome/README.md](gnome/README.md) for settings and development notes. On Windows, `codeburn web` is the always-on view for now.
+
+## CodeBurn in your agent (MCP)
+
+```bash
+claude mcp add codeburn -- npx -y codeburn mcp
+```
+
+`codeburn mcp` runs a local MCP server over stdio, so Claude Code, Cursor, or any MCP client can ask "where did my tokens go this week?" or "how do I spend less?" mid-conversation. It exposes two tools:
+
+| Tool | What it returns |
+|------|-----------------|
+| `get_usage` | Spend and usage with breakdowns by tool, model, project, and task (fast) |
+| `get_savings` | Cost reductions: waste findings, retry tax, routing waste (slower, deeper analysis) |
+
+Everything is read from local disk, same as the CLI. Project names are pseudonymized by default; the agent only sees real names if it asks with `include_project_names: true`. For other MCP clients, configure a stdio server with command `npx` and args `-y codeburn mcp`.
+
 ## Supported tools
 
 CodeBurn auto-detects which AI tools you use. Each logo links to its provider doc.
@@ -336,6 +401,19 @@ Run `codeburn` for the dashboard, or use a subcommand below. Most commands also 
 | `codeburn yield` | Productive vs reverted/abandoned spend, correlated against git |
 | `codeburn yield -p 30days` | Yield analysis for the last 30 days |
 
+**Fix & control**
+
+| Command | What it does |
+|---------|--------------|
+| `codeburn optimize --apply` | Interactively apply config-class fixes (`--yes`, `--dry-run`, `--only <ids>`) |
+| `codeburn act list` | Every change CodeBurn has applied, newest first |
+| `codeburn act undo <id>` | Roll a change back (`--last` for the most recent, `--force` if files drifted) |
+| `codeburn act report` | Realized vs estimated savings for applied fixes |
+| `codeburn guard install` | Budget-cap hooks for Claude Code (`--global`, `--statusline`) |
+| `codeburn guard status` | Show caps, install locations, and flagged projects |
+| `codeburn guard allow` | Lift the hard cap for the current session |
+| `codeburn mcp` | MCP server (stdio) exposing usage and savings to AI agents |
+
 **Models**
 
 | Command | What it does |
@@ -427,6 +505,16 @@ codeburn model-alias --remove "my-proxy-model"             # remove alias
 ```
 
 Aliases are stored in `~/.config/codeburn/config.json` and applied at runtime before pricing lookup. The target name can be anything in the [LiteLLM model list](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json) or a canonical name from the fallback table (e.g. `claude-sonnet-4-6`, `claude-opus-4-5`, `gpt-4o`). Built-in aliases ship for known proxy model name variants. User-configured aliases take precedence over built-ins.
+
+### Local Models, Custom Prices, and Proxies
+
+```bash
+codeburn price-override my-model --input 0.27 --output 1.10   # USD per 1M tokens
+codeburn model-savings "llama3.1:8b" gpt-4o                   # local model, counted as savings
+codeburn proxy-path ~/work/copilot-repo                       # subscription-covered project
+```
+
+`price-override` sets exact rates for any model (input, output, cache read, cache creation), useful for private deployments or models LiteLLM prices wrong. `model-savings` maps a free local model to a paid baseline: the local calls stay $0, and the dashboard shows what the same tokens would have cost on the baseline. `proxy-path` marks a project routed through a subscription-backed proxy (e.g. Claude Code over GitHub Copilot), so its API-rate cost is reported as subscription-covered and your net out-of-pocket stays honest. All three support `--list` and `--remove`.
 
 ### Filtering
 
