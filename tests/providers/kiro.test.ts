@@ -599,6 +599,17 @@ describe('kiro provider - metadata', () => {
     expect(kiro.toolDisplayName('unknown_tool')).toBe('unknown_tool')
   })
 
+  it('normalizes CLI-specific tool names', () => {
+    expect(kiro.toolDisplayName('code')).toBe('Read')
+    expect(kiro.toolDisplayName('subagent')).toBe('Agent')
+    expect(kiro.toolDisplayName('web_fetch')).toBe('WebFetch')
+  })
+
+  it('passes through MCP tool names unchanged', () => {
+    expect(kiro.toolDisplayName('mcp__server__searchJira')).toBe('mcp__server__searchJira')
+    expect(kiro.toolDisplayName('mcp__atlassian__getIssue')).toBe('mcp__atlassian__getIssue')
+  })
+
   it('longest-prefix match for versioned model IDs', () => {
     expect(kiro.modelDisplayName('claude-sonnet-4-5-20260101')).toBe('Sonnet 4.5')
     expect(kiro.modelDisplayName('claude-haiku-4-5-20260101')).toBe('Haiku 4.5')

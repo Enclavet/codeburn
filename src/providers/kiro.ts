@@ -54,9 +54,12 @@ const toolNameMap: Record<string, string> = {
   fileSearch: 'Glob',
   webSearch: 'WebSearch',
   web_search: 'WebSearch',
+  web_fetch: 'WebFetch',
   fsWrite: 'Edit',
   strReplace: 'Edit',
   listDirectory: 'LS',
+  code: 'Read',
+  subagent: 'Agent',
 }
 
 type KiroChatMessage = {
@@ -853,6 +856,7 @@ export function createKiroProvider(agentDirOverride?: string, workspaceStorageDi
     },
 
     toolDisplayName(rawTool: string): string {
+      if (rawTool.startsWith('mcp__')) return rawTool
       return toolNameMap[rawTool] ?? rawTool
     },
 
