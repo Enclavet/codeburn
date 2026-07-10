@@ -41,6 +41,40 @@ const toolNameMap: Record<string, string> = {
   read_dir: 'Glob',
 }
 
+// CLI-based MCP wrappers (e.g. philschmid/mcp-cli) let Codex call an MCP tool
+// through a shell command instead of registering the server natively. Codex
+// then logs a plain exec_command with no `mcp_tool_call_end` event, so the MCP
+// usage would only appear as a shell command and be absent from the MCP
+// breakdown (issue #478). Recognize the `mcp-cli [options] call <server>
+// <tool>` form and return the canonical mcp__<server>__<tool> so the call is
+// also attributed to MCP. Only the `call` subcommand (an actual tool execution)
+// is matched; info / grep / bare listing are lookups. The exec_command still
+// counts as Bash since it genuinely is a shell exec. Scoped to the mcp-cli
+// binary; other wrappers would need their own pattern.
+//
+// The negative lookbehind keeps `mcp-cli` a standalone binary (a leading
+// quote/space/slash from a `bash -lc "..."` wrapper or absolute path is fine,
+// but `foo-mcp-cli` is not). `(?:\s+(?!call\b)[^\s;|&]+)*` skips any options and
+// their values between the binary and the subcommand (e.g.
+// `mcp-cli -c ./mcp.json call ...`) without crossing a shell separator, and
+// stops at the `call` token. This is substring matching, so a command that
+// merely mentions the phrase (a comment, an echo, a commit message) can
+// false-positive, an accepted tradeoff for the common case. \s+ and the token
+// class don't overlap, so there is no catastrophic backtracking.
+const MCP_CLI_CALL = /(?<![\w.-])mcp-cli(?:\s+(?!call\b)[^\s;|&]+)*\s+call\s+(\S+)\s+(\S+)/
+function mcpToolFromShellCommand(command: unknown): string | null {
+  const text = typeof command === 'string'
+    ? command
+    : Array.isArray(command) ? command.filter(x => typeof x === 'string').join(' ') : ''
+  if (!text) return null
+  const m = MCP_CLI_CALL.exec(text)
+  if (!m) return null
+  const server = m[1]!.replace(/['"]/g, '')
+  const tool = m[2]!.replace(/['"]/g, '')
+  if (!server || !tool) return null
+  return `mcp__${server}__${tool}`
+}
+
 type CodexEntry = {
   type: string
   timestamp?: string
@@ -386,6 +420,13 @@ function createParser(source: SessionSource, seenKeys: Set<string>): SessionPars
             if (typeof fp === 'string') call.file = fp
             const cmd = args['command'] ?? args['cmd']
             if (typeof cmd === 'string') call.command = cmd
+            // Attribute a CLI-wrapped MCP call (e.g. `mcp-cli call server tool`)
+            // to the MCP breakdown too; the exec still counts as Bash above.
+            const mcpTool = mcpToolFromShellCommand(cmd)
+            if (mcpTool) {
+              pendingTools.push(mcpTool)
+              pendingToolSequence.push([{ tool: mcpTool }])
+            }
           }
           pendingToolSequence.push([call])
           continue

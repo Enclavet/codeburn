@@ -111,6 +111,11 @@ export const DURABLE_PROVIDER_NAMES: ReadonlySet<string> = new Set(['copilot'])
 const PROVIDER_PARSE_VERSIONS: Record<string, string> = {
   claude: 'cowork-space-grouping-v1',
   cline: 'worktree-project-grouping-v1',
+  // Bump when the Codex parser changes attribution so unchanged, already-cached
+  // session files re-parse (session-cache.json serves them without invoking the
+  // provider parser otherwise). Covers native mcp_tool_call_end (#513) and
+  // CLI-wrapped `mcp-cli call` (#478) MCP attribution.
+  codex: 'mcp-attribution-v2',
   cursor: 'composer-anchored-crediting-v1',
   'cursor-agent': 'workspaceless-transcript-v1',
   copilot: 'otel-durable-v1',
