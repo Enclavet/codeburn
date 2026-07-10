@@ -868,6 +868,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     // restart. Skips redundant writes by tracking the last payload's `generated`
     // stamp. This is the only writer now that the launchd fetcher is gone.
     private func persistBadgeStatusFile() {
+        // Only persist the unscoped (All) badge. Config selection resets to All
+        // on relaunch, so a scoped payload on disk would show the wrong config's
+        // number at next launch.
+        guard store.selectedClaudeConfigSourceId == nil else { return }
         guard let payload = store.menubarPayload else { return }
         guard payload.generated != lastWrittenBadgeGenerated else { return }
         do {
@@ -883,6 +887,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     // The 10-min bound discards a file too stale to trust.
     private func badgePayload() -> MenubarPayload? {
         let inMemory = store.menubarPayload
+        // While scoped to a config, never fall back to the on-disk badge: it
+        // holds the unscoped All payload and would show the wrong number.
+        if store.selectedClaudeConfigSourceId != nil { return inMemory }
         let inMemoryAge = store.menubarPayloadAgeSeconds.map(TimeInterval.init)
         guard let fileRead = MenubarStatusCache.standard().readBadgePayload(maxAgeSeconds: 600) else {
             return inMemory

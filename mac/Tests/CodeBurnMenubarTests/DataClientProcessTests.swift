@@ -47,6 +47,33 @@ struct DataClientProcessTests {
         #expect(value(after: "--days", in: args) == "2026-06-01,2026-06-02")
     }
 
+    @Test("status argv local includes Claude config source")
+    func statusSubcommandLocalIncludesClaudeConfigSource() {
+        let args = DataClient.statusSubcommand(
+            period: .today,
+            provider: .all,
+            includeOptimize: false,
+            scope: .local,
+            claudeConfigSourceId: "claude-config:work"
+        )
+
+        #expect(value(after: "--claude-config-source", in: args) == "claude-config:work")
+    }
+
+    @Test("status argv combined omits Claude config source")
+    func statusSubcommandCombinedOmitsClaudeConfigSource() {
+        let args = DataClient.statusSubcommand(
+            period: .today,
+            provider: .all,
+            includeOptimize: false,
+            scope: .combined,
+            claudeConfigSourceId: "claude-config:work"
+        )
+
+        #expect(value(after: "--scope", in: args) == "combined")
+        #expect(!args.contains("--claude-config-source"))
+    }
+
     @Test("status argv supports LingTai TUI provider")
     func statusSubcommandSupportsLingTaiTUI() {
         let args = DataClient.statusSubcommand(

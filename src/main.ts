@@ -1,5 +1,5 @@
 import { isAbsolute } from 'path'
-import { Command } from 'commander'
+import { Command, Option } from 'commander'
 import { installMenubarApp } from './menubar-installer.js'
 import { exportCsv, exportJson, type PeriodExport } from './export.js'
 import { findUnpricedModels, loadPricing, setModelAliases, setPriceOverrides, setLocalModelSavings, setProxyPaths, normalizeProxyPath } from './models.js'
@@ -663,6 +663,7 @@ program
   .option('--to <date>', 'End date (YYYY-MM-DD) for custom range')
   .option('--days <dates>', 'Comma-separated dates (YYYY-MM-DD) for multi-day selection')
   .option('--no-optimize', 'Skip optimize findings (menubar-json only, faster)')
+  .addOption(new Option('--claude-config-source <id>').hideHelp())
   .action(async (opts) => {
     assertFormat(opts.format, ['terminal', 'menubar-json', 'json'], 'status')
     assertScope(opts.scope, ['local', 'combined'], 'status')
@@ -677,6 +678,17 @@ program
     }
     if (opts.format === 'menubar-json' && opts.scope === 'combined' && opts.days) {
       process.stderr.write('error: --scope combined cannot be combined with --days\n')
+      process.exit(1)
+    }
+    if (opts.format === 'menubar-json' && opts.scope === 'combined' && opts.claudeConfigSource) {
+      process.stderr.write('error: --scope combined cannot be combined with --claude-config-source\n')
+      process.exit(1)
+    }
+    // A Claude config source scopes Claude usage only, so it is contradictory
+    // with a non-Claude provider filter. 'all' is fine (it resolves to that
+    // config's Claude data).
+    if (opts.claudeConfigSource && opts.provider !== 'all' && opts.provider !== 'claude') {
+      process.stderr.write(`error: --claude-config-source cannot be combined with --provider ${opts.provider} (a Claude config scopes Claude usage only)\n`)
       process.exit(1)
     }
     if (opts.scope === 'combined' && (opts.provider !== 'all' || opts.project.length > 0 || opts.exclude.length > 0)) {
@@ -701,6 +713,7 @@ program
         exclude: opts.exclude,
         daysSelection,
         optimize: opts.optimize !== false,
+        claudeConfigSourceId: opts.claudeConfigSource,
       })
       if (opts.scope === 'combined') {
         // Combined multi-device usage is best-effort enrichment on the menubar's
