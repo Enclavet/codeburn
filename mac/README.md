@@ -39,8 +39,7 @@ nonisolated context` errors.
 
 (The `-10825` launch failure itself is fixed by `Package.swift`'s `.macOS(.v14)`
 deployment target: ld64 drops the macOS-15-only `libswift_errno.dylib`
-dependency for any build with that target, regardless of which SDK built it —
-including the CI-distributed release. This local-build path exists only for
+dependency for any build with that target, regardless of which SDK built it, including the CI-distributed release. This local-build path exists only for
 the narrower case of building on a Sonoma machine with nothing but the
 Command Line Tools, where the SDK's un-annotated `View` protocol needs the
 `@MainActor` patch below.)

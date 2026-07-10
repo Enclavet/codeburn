@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================================
-# build-local.sh — Build CodeBurnMenubar.app on a macOS 14 (Sonoma) machine.
+# build-local.sh, Build CodeBurnMenubar.app on a macOS 14 (Sonoma) machine.
 # ============================================================================
 # Why this exists
 # ---------------
@@ -59,7 +59,7 @@ SDK_VERSION="$(xcrun --sdk macosx --show-sdk-version)"
 case "${SDK_VERSION}" in
   14.*) ;;
   *)
-    echo "✗ Active SDK is macOS ${SDK_VERSION}, not 14.x — xcode-select is likely" >&2
+    echo "✗ Active SDK is macOS ${SDK_VERSION}, not 14.x, xcode-select is likely" >&2
     echo "  pointed at a newer Xcode instead of the Command Line Tools. Run:" >&2
     echo "    sudo xcode-select -s /Library/Developer/CommandLineTools" >&2
     exit 1
@@ -86,7 +86,7 @@ done
 
 # --- build each arch separately, then lipo into one universal binary --------
 # `swift build --arch arm64 --arch x86_64` together shells out to xcbuild,
-# which the Command Line Tools doesn't ship — each arch alone stays on the
+# which the Command Line Tools doesn't ship, each arch alone stays on the
 # plain SwiftPM build path, so build twice and merge with lipo instead.
 BINS=()
 for arch in arm64 x86_64; do
