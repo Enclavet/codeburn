@@ -51,6 +51,9 @@ export type CachedCall = {
   toolErrors?: number
   // Codex: count of this call's patch applications with success === false.
   editFailed?: number
+  activeDurationMs?: number
+  activeGeneratedTokens?: number
+  toolWaitMs?: number
 }
 
 export type CachedTurn = {
@@ -213,7 +216,7 @@ export const PROVIDER_PARSE_VERSIONS: Record<string, string> = {
   // rich-session-capture-v1: per-call LOC deltas + editFailed from
   // patch_apply_end. (The codex-results.json CODEX_CACHE_VERSION is bumped in
   // lockstep so the pre-session-cache layer re-parses too.)
-  codex: 'mcp-attribution-v2-est-cost-rich-capture-v1-cross-provider-pr-v1',
+  codex: 'mcp-attribution-v5-est-cost-active-timing-mcp-wait-rich-capture-v1-cross-provider-pr-v1',
   cursor: 'composer-anchored-crediting-v1-est-cost',
   'cursor-agent': 'workspaceless-transcript-v1',
   copilot: 'cli-shutdown-cost-v1-skills',
@@ -337,6 +340,9 @@ function validateCall(c: unknown): c is CachedCall {
     && (o['speed'] === 'standard' || o['speed'] === 'fast')
     && isOptionalNum(o['costUSD'])
     && isOptionalBool(o['isEstimated'])
+    && isOptionalNum(o['activeDurationMs'])
+    && isOptionalNum(o['activeGeneratedTokens'])
+    && isOptionalNum(o['toolWaitMs'])
     && isStringArray(o['tools'])
     && isStringArray(o['bashCommands'])
     && isStringArray(o['skills'])

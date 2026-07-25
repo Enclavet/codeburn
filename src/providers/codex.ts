@@ -32,6 +32,9 @@ const modelDisplayEntries = Object.entries(modelDisplayNames).sort((a, b) => b[0
 
 const toolNameMap: Record<string, string> = {
   exec_command: 'Bash',
+  // Codex Desktop's custom-tool transport uses the shorter `exec` name for
+  // the same shell tool that CLI rollouts record as `exec_command`.
+  exec: 'Bash',
   read_file: 'Read',
   write_file: 'Edit',
   apply_diff: 'Edit',
@@ -96,6 +99,11 @@ type CodexEntry = {
   timestamp?: string
   payload?: {
     type?: string
+    turn_id?: string
+    call_id?: string
+    started_at?: number
+    duration_ms?: number
+    duration?: { secs?: number; nanos?: number } | string
     role?: string
     cwd?: string
     model_provider?: string
@@ -104,6 +112,7 @@ type CodexEntry = {
     forked_from_id?: string
     model?: string
     name?: string
+    invocation?: { server?: string; tool?: string }
     content?: Array<{ type?: string; text?: string }>
     info?: {
       model?: string
@@ -196,9 +205,126 @@ function getRawJsonStringField(head: string, field: string): string | undefined 
   }
 }
 
+function getRawJsonNumberField(head: string, field: string): number | undefined {
+  const match = new RegExp(`"${field}"\\s*:\\s*(-?\\d+(?:\\.\\d+)?)`).exec(head)
+  if (!match) return undefined
+  const value = Number(match[1])
+  return Number.isFinite(value) ? value : undefined
+}
+
+function getRawPayloadFieldWindow(source: Buffer, field: string, windowBytes = 4096): string | undefined {
+  const payloadKey = Buffer.from('"payload"')
+  const payloadIndex = source.indexOf(payloadKey)
+  if (payloadIndex < 0) return undefined
+  let payloadStart = source.indexOf(0x7b, payloadIndex + payloadKey.length) // {
+  if (payloadStart < 0) return undefined
+
+  let depth = 0
+  let inString = false
+  let escaped = false
+  for (let i = payloadStart; i < source.length; i++) {
+    const byte = source[i]!
+    if (inString) {
+      if (escaped) escaped = false
+      else if (byte === 0x5c) escaped = true // \\
+      else if (byte === 0x22) inString = false // "
+      continue
+    }
+    if (byte === 0x22) {
+      const keyStart = i + 1
+      let keyEnd = keyStart
+      let keyEscaped = false
+      for (; keyEnd < source.length; keyEnd++) {
+        const keyByte = source[keyEnd]!
+        if (keyEscaped) { keyEscaped = false; continue }
+        if (keyByte === 0x5c) { keyEscaped = true; continue }
+        if (keyByte === 0x22) break
+      }
+      if (depth === 1 && keyEnd < source.length) {
+        const key = source.subarray(keyStart, keyEnd).toString('utf-8')
+        let valueStart = keyEnd + 1
+        while (valueStart < source.length && (source[valueStart] === 0x20 || source[valueStart] === 0x09 || source[valueStart] === 0x0a || source[valueStart] === 0x0d)) valueStart++
+        if (source[valueStart] === 0x3a && key === field) {
+          return source.subarray(i, Math.min(source.length, i + windowBytes)).toString('utf-8')
+        }
+      }
+      i = keyEnd
+      inString = false
+      continue
+    }
+    if (byte === 0x22) inString = true
+    else if (byte === 0x7b || byte === 0x5b) depth++ // { or [
+    else if (byte === 0x7d || byte === 0x5d) depth-- // } or ]
+    if (depth < 0) break
+  }
+  return undefined
+}
+
+function getRawDurationMs(head: string): number | undefined {
+  const objectMatch = /"duration"\s*:\s*\{\s*"secs"\s*:\s*(-?\d+(?:\.\d+)?)\s*,\s*"nanos"\s*:\s*(-?\d+(?:\.\d+)?)\s*\}/.exec(head)
+  if (objectMatch) {
+    const seconds = Number(objectMatch[1])
+    const nanos = Number(objectMatch[2])
+    if (Number.isFinite(seconds) && Number.isFinite(nanos)) return seconds * 1000 + nanos / 1e6
+  }
+  const text = getRawJsonStringField(head, 'duration')
+  if (text) {
+    const match = /^(\d+(?:\.\d+)?)(ms|s)?$/.exec(text.trim())
+    if (match) {
+      const value = Number(match[1])
+      if (Number.isFinite(value)) return value * (match[2] === 's' ? 1000 : 1)
+    }
+  }
+  return undefined
+}
+
+function durationValueMs(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  if (typeof value === 'object' && value) {
+    const record = value as Record<string, unknown>
+    const seconds = record['secs']
+    const nanos = record['nanos']
+    if (typeof seconds === 'number' && typeof nanos === 'number' && Number.isFinite(seconds) && Number.isFinite(nanos)) {
+      return seconds * 1000 + nanos / 1e6
+    }
+  }
+  if (typeof value === 'string') {
+    const match = /^(\d+(?:\.\d+)?)(ms|s)?$/.exec(value.trim())
+    if (match) {
+      const parsed = Number(match[1])
+      if (Number.isFinite(parsed)) return parsed * (match[2] === 's' ? 1000 : 1)
+    }
+  }
+  return undefined
+}
+
+function getRawTokenUsage(head: string, field: 'last_token_usage' | 'total_token_usage'): CodexTokenUsage | undefined {
+  const match = new RegExp(`"${field}"\\s*:\\s*\\{([^}]*)\\}`).exec(head)
+  if (!match) return undefined
+  const body = match[1]!
+  return {
+    input_tokens: getRawJsonNumberField(body, 'input_tokens'),
+    cached_input_tokens: getRawJsonNumberField(body, 'cached_input_tokens'),
+    output_tokens: getRawJsonNumberField(body, 'output_tokens'),
+    reasoning_output_tokens: getRawJsonNumberField(body, 'reasoning_output_tokens'),
+    total_tokens: getRawJsonNumberField(body, 'total_tokens'),
+  }
+}
+
 function payloadHead(head: string): string {
   const idx = head.indexOf('"payload"')
   return idx === -1 ? head : head.slice(idx)
+}
+
+function getRawInvocation(head: string): { server?: string; tool?: string } | undefined {
+  const idx = head.indexOf('"invocation"')
+  if (idx === -1) return undefined
+  // Server/tool are shallow fields and precede the potentially huge arguments
+  // object in Codex MCP records. Limit this scan to keep compact parsing cheap.
+  const invocationHead = head.slice(idx, idx + 8192)
+  const server = getRawJsonStringField(invocationHead, 'server')
+  const tool = getRawJsonStringField(invocationHead, 'tool')
+  return server || tool ? { server, tool } : undefined
 }
 
 function countJsonStringBytes(source: Buffer, valueStart: number): number {
@@ -270,6 +396,31 @@ function parseCodexLine(line: string | Buffer): CodexEntry | null {
   const pHead = payloadHead(head)
   const payloadType = getRawJsonStringField(pHead, 'type')
   const role = getRawJsonStringField(pHead, 'role')
+  // task_complete appends the potentially huge final assistant message before
+  // its duration fields. Fall back to the full Buffer only for this event so
+  // timing metadata is not lost when the compact head stops early.
+  const needsTimingTail = type === 'event_msg' && (payloadType === 'task_complete' || payloadType === 'mcp_tool_call_end')
+  const timingTail = needsTimingTail && line.length > RAW_HEAD_BYTES
+    ? line.subarray(Math.max(0, line.length - 16 * 1024)).toString('utf-8')
+    : pHead
+  const timingNumber = (field: string): number | undefined =>
+    getRawJsonNumberField(pHead, field) ?? getRawJsonNumberField(timingTail, field)
+  // MCP records can place a large invocation.arguments object before duration
+  // and a large result after it. Searching a small window around the field
+  // avoids materializing the middle of the Buffer while still preserving wait
+  // timing for those records.
+  const payloadDuration = payloadType === 'mcp_tool_call_end'
+    ? getRawDurationMs(getRawPayloadFieldWindow(line, 'duration') ?? '')
+    : undefined
+  const timingDuration = payloadDuration ?? getRawDurationMs(pHead) ?? getRawDurationMs(timingTail)
+  const compactModel = getRawJsonStringField(pHead, 'model')
+  const compactModelName = getRawJsonStringField(pHead, 'model_name')
+  const compactLastUsage = getRawTokenUsage(pHead, 'last_token_usage')
+  const compactTotalUsage = getRawTokenUsage(pHead, 'total_token_usage')
+  const compactInfo = compactModel || compactModelName || compactLastUsage || compactTotalUsage
+    ? { model: compactModel, model_name: compactModelName, last_token_usage: compactLastUsage, total_token_usage: compactTotalUsage }
+    : undefined
+  const invocation = getRawInvocation(pHead) ?? getRawInvocation(timingTail)
 
   const entry: CodexEntry = {
     type,
@@ -284,6 +435,12 @@ function parseCodexLine(line: string | Buffer): CodexEntry | null {
       forked_from_id: getRawJsonStringField(pHead, 'forked_from_id'),
       model: getRawJsonStringField(pHead, 'model'),
       name: getRawJsonStringField(pHead, 'name'),
+      invocation,
+      call_id: getRawJsonStringField(pHead, 'call_id'),
+      turn_id: getRawJsonStringField(pHead, 'turn_id'),
+      duration_ms: timingNumber('duration_ms') ?? timingDuration,
+      started_at: timingNumber('started_at'),
+      info: compactInfo,
     },
   }
 
@@ -296,25 +453,47 @@ function parseCodexLine(line: string | Buffer): CodexEntry | null {
   return entry
 }
 
-async function discoverSessionFile(filePath: string): Promise<SessionSource | null> {
+type DiscoveredCodexSession = {
+  source: SessionSource
+  sessionId?: string
+}
+
+async function discoverSessionFile(filePath: string): Promise<DiscoveredCodexSession | null> {
   const s = await stat(filePath).catch(() => null)
   if (!s?.isFile()) return null
 
   const cachedProject = await getCachedCodexProject(filePath)
+  const { valid, meta } = await isValidCodexSession(filePath)
   if (cachedProject) {
-    return { path: filePath, project: cachedProject, provider: 'codex' }
+    return {
+      source: { path: filePath, project: cachedProject, provider: 'codex' },
+      sessionId: valid ? meta?.payload?.session_id : undefined,
+    }
   }
 
-  const { valid, meta } = await isValidCodexSession(filePath)
   if (!valid || !meta) return null
 
   const cwd = meta.payload?.cwd ?? 'unknown'
-  return { path: filePath, project: sanitizeProject(cwd), provider: 'codex' }
+  return {
+    source: { path: filePath, project: sanitizeProject(cwd), provider: 'codex' },
+    sessionId: meta.payload?.session_id,
+  }
 }
 
 async function discoverSessionsInDir(codexDir: string): Promise<SessionSource[]> {
   const sources: SessionSource[] = []
+  // A rollout can exist in both roots during/after archiving. The active root
+  // is scanned first, and session_id keeps the archived copy from resurfacing.
+  const seenSessionIds = new Set<string>()
   const sessionsDir = join(codexDir, 'sessions')
+
+  const addSession = (discovered: DiscoveredCodexSession | null): void => {
+    if (!discovered) return
+    const sessionId = discovered.sessionId?.trim()
+    if (sessionId && seenSessionIds.has(sessionId)) return
+    if (sessionId) seenSessionIds.add(sessionId)
+    sources.push(discovered.source)
+  }
 
   const years = await readdir(sessionsDir).catch(() => [] as string[])
 
@@ -336,8 +515,7 @@ async function discoverSessionsInDir(codexDir: string): Promise<SessionSource[]>
         for (const file of files) {
           if (!file.startsWith('rollout-') || !file.endsWith('.jsonl')) continue
           const filePath = join(dayDir, file)
-          const source = await discoverSessionFile(filePath)
-          if (source) sources.push(source)
+          addSession(await discoverSessionFile(filePath))
         }
       }
     }
@@ -349,8 +527,7 @@ async function discoverSessionsInDir(codexDir: string): Promise<SessionSource[]>
   const archivedFiles = await readdir(archivedDir).catch(() => [] as string[])
   for (const file of archivedFiles) {
     if (!file.startsWith('rollout-') || !file.endsWith('.jsonl')) continue
-    const source = await discoverSessionFile(join(archivedDir, file))
-    if (source) sources.push(source)
+    addSession(await discoverSessionFile(join(archivedDir, file)))
   }
 
   return sources
@@ -410,6 +587,11 @@ function createParser(source: SessionSource, seenKeys: Set<string>): SessionPars
       let currentTurnId = `${sessionId}:t0`
       let sawAnyLine = false
       const results: ParsedProviderCall[] = []
+      let taskResultStart = 0
+      let taskGeneratedTokens = 0
+      let taskToolIntervals: Array<[number, number]> = []
+      let taskStartedAt: number | undefined
+      const openToolStarts = new Map<string, number>()
 
       // Stream the session file line by line. Heavy Codex sessions can exceed
       // 250 MB on disk; reading the entire file into a string would either hit
@@ -437,7 +619,29 @@ function createParser(source: SessionSource, seenKeys: Set<string>): SessionPars
           continue
         }
 
-        if (entry.type === 'response_item' && entry.payload?.type === 'function_call') {
+        const isForkReplay = Boolean(forkCutoff && entry.timestamp && entry.timestamp < forkCutoff)
+        if (isForkReplay && (
+          entry.payload?.type === 'task_started' ||
+          entry.payload?.type === 'task_complete' ||
+          entry.payload?.type === 'function_call' ||
+          entry.payload?.type === 'function_call_output' ||
+          entry.payload?.type === 'custom_tool_call' ||
+          entry.payload?.type === 'custom_tool_call_output' ||
+          entry.payload?.type === 'mcp_tool_call_end' ||
+          entry.payload?.type === 'patch_apply_end'
+        )) continue
+
+        if (entry.type === 'event_msg' && entry.payload?.type === 'task_started') {
+          taskResultStart = results.length
+          taskGeneratedTokens = 0
+          taskToolIntervals = []
+          const startedAt = entry.timestamp ? Date.parse(entry.timestamp) : NaN
+          taskStartedAt = Number.isFinite(startedAt) ? startedAt : undefined
+          openToolStarts.clear()
+          continue
+        }
+
+        if (entry.type === 'response_item' && (entry.payload?.type === 'function_call' || entry.payload?.type === 'custom_tool_call')) {
           const rawName = entry.payload.name ?? ''
           const mapped = toolNameMap[rawName] ?? rawName
           pendingTools.push(mapped)
@@ -459,7 +663,50 @@ function createParser(source: SessionSource, seenKeys: Set<string>): SessionPars
               pendingToolSequence.push([{ tool: mcpTool }])
             }
           }
+          const callId = entry.payload.call_id
+          const started = entry.timestamp ? Date.parse(entry.timestamp) : NaN
+          if (callId && Number.isFinite(started)) openToolStarts.set(callId, started)
           pendingToolSequence.push([call])
+          continue
+        }
+
+        if (entry.type === 'response_item' && (entry.payload?.type === 'function_call_output' || entry.payload?.type === 'custom_tool_call_output')) {
+          const callId = entry.payload.call_id
+          const ended = entry.timestamp ? Date.parse(entry.timestamp) : NaN
+          const started = callId ? openToolStarts.get(callId) : undefined
+          if (started !== undefined && Number.isFinite(ended) && ended > started) taskToolIntervals.push([started, ended])
+          if (callId) openToolStarts.delete(callId)
+          continue
+        }
+
+        if (entry.type === 'event_msg' && entry.payload?.type === 'task_complete') {
+          const durationMs = entry.payload.duration_ms
+          if (typeof durationMs === 'number' && durationMs > 0 && taskGeneratedTokens > 0 && taskResultStart < results.length) {
+            const completedAt = entry.timestamp ? Date.parse(entry.timestamp) : NaN
+            const windowStart = taskStartedAt ?? (Number.isFinite(completedAt) ? completedAt - durationMs : undefined)
+            const windowEnd = windowStart !== undefined ? windowStart + durationMs : undefined
+            const clipped = taskToolIntervals.map(([start, end]) => [
+              windowStart !== undefined ? Math.max(start, windowStart) : start,
+              windowEnd !== undefined ? Math.min(end, windowEnd) : end,
+            ] as [number, number]).filter(([start, end]) => end > start)
+            const merged = clipped.sort((a, b) => a[0] - b[0]).reduce<Array<[number, number]>>((acc, interval) => {
+              const previous = acc.at(-1)
+              if (previous && interval[0] <= previous[1]) previous[1] = Math.max(previous[1], interval[1])
+              else acc.push([...interval])
+              return acc
+            }, [])
+            const toolWaitMs = Math.min(durationMs, merged.reduce((sum, interval) => sum + interval[1] - interval[0], 0))
+            const activeMs = durationMs - toolWaitMs
+            if (activeMs <= 0) continue
+            for (let i = taskResultStart; i < results.length; i++) {
+              const call = results[i]!
+              const generated = call.outputTokens + call.reasoningTokens
+              if (generated <= 0) continue
+              call.activeGeneratedTokens = generated
+              call.activeDurationMs = activeMs * (generated / taskGeneratedTokens)
+              call.toolWaitMs = toolWaitMs * (generated / taskGeneratedTokens)
+            }
+          }
           continue
         }
 
@@ -490,6 +737,11 @@ function createParser(source: SessionSource, seenKeys: Set<string>): SessionPars
         // attributed. Rebuild the canonical `mcp__<server>__<tool>` name the
         // classifier recognizes.
         if (entry.type === 'event_msg' && entry.payload?.type === 'mcp_tool_call_end') {
+          const endedAt = entry.timestamp ? Date.parse(entry.timestamp) : NaN
+          const durationMs = entry.payload.duration_ms ?? durationValueMs(entry.payload.duration)
+          if (typeof durationMs === 'number' && durationMs > 0 && Number.isFinite(endedAt)) {
+            taskToolIntervals.push([endedAt - durationMs, endedAt])
+          }
           const inv = (entry.payload as Record<string, unknown>)['invocation'] as Record<string, unknown> | undefined
           const server = typeof inv?.['server'] === 'string' ? inv['server'] as string : ''
           const tool = typeof inv?.['tool'] === 'string' ? inv['tool'] as string : ''
@@ -568,6 +820,7 @@ function createParser(source: SessionSource, seenKeys: Set<string>): SessionPars
               ...(pendingLocRemoved ? { locRemoved: pendingLocRemoved } : {}),
               ...(pendingEditFailed ? { editFailed: pendingEditFailed } : {}),
             })
+            taskGeneratedTokens += estOutput
 
             pendingTools = []
             pendingToolSequence = []
@@ -685,6 +938,7 @@ function createParser(source: SessionSource, seenKeys: Set<string>): SessionPars
             ...(pendingLocRemoved ? { locRemoved: pendingLocRemoved } : {}),
             ...(pendingEditFailed ? { editFailed: pendingEditFailed } : {}),
           })
+          taskGeneratedTokens += outputTokens + reasoningTokens
 
           pendingTools = []
           pendingToolSequence = []
