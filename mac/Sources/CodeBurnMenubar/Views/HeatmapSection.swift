@@ -2168,41 +2168,31 @@ private struct KimiPlanInsight: View {
 
     var body: some View {
         Group {
-            switch store.kimiLoadState {
-            case .notBootstrapped, .noCredentials:
+            switch KimiQuotaPresentation.planContent(loadState: store.kimiLoadState, hasUsage: store.kimiUsage != nil) {
+            case .noCredentials:
                 PlanNoCredentialsView(
                     title: "No Kimi Code credentials found",
                     message: "Sign in with the Kimi CLI first. Then click Try Again."
                 ) { Task { await store.bootstrapKimi() } }
-            case .dormant, .bootstrapping:
-                PlanLoadingView(message: "Reading Kimi Code credentials...")
             case .loading:
-                if let usage = store.kimiUsage {
-                    loadedBody(usage: usage)
-                } else {
-                    PlanLoadingView(message: "Reading Kimi Code credentials...")
-                }
+                PlanLoadingView(message: "Reading Kimi Code credentials...")
             case .failed:
                 PlanFailedView(
                     error: store.kimiError
                 ) { Task { await store.refreshKimi() } }
-            case .transientFailure:
-                if let usage = store.kimiUsage {
-                    loadedBody(usage: usage)
-                } else {
-                    PlanFailedView(
-                        error: store.kimiError ?? "Kimi temporarily unreachable — retrying."
-                    ) { Task { await store.refreshKimi() } }
-                }
-            case let .terminalFailure(reason):
+            case .transientFailed:
+                PlanFailedView(
+                    error: store.kimiError ?? "Kimi temporarily unreachable — retrying."
+                ) { Task { await store.refreshKimi() } }
+            case let .reconnect(reason):
                 PlanReconnectView(
                     title: "Refresh Kimi Code login",
                     reason: reason,
                     fallback: "Kimi Code tokens are short-lived. Run the Kimi CLI once to refresh your login, then click Reconnect."
                 ) { Task { await store.bootstrapKimi() } }
-            case .loaded:
+            case let .usage(idle):
                 if let usage = store.kimiUsage {
-                    loadedBody(usage: usage)
+                    loadedBody(usage: usage, idle: idle)
                 } else {
                     PlanLoadingView(message: "Reading Kimi Code credentials...")
                 }
@@ -2211,7 +2201,7 @@ private struct KimiPlanInsight: View {
     }
 
     @ViewBuilder
-    private func loadedBody(usage: KimiUsage) -> some View {
+    private func loadedBody(usage: KimiUsage, idle: Bool) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .firstTextBaseline) {
                 Text(usage.plan ?? "Kimi Code")
@@ -2251,6 +2241,16 @@ private struct KimiPlanInsight: View {
                         .foregroundStyle(.secondary)
                 }
             }
+            if idle {
+                Text("Login idle. Run the Kimi CLI to refresh.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+            }
+            if KimiQuotaPresentation.isStale(fetchedAt: usage.fetchedAt) {
+                Text("as of \(shortTime(usage.fetchedAt))")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+            }
         }
         .padding(.horizontal, 14)
         .padding(.top, 4)
@@ -2261,6 +2261,13 @@ private struct KimiPlanInsight: View {
         let f = RelativeDateTimeFormatter()
         f.unitsStyle = .short
         return f.localizedString(for: date, relativeTo: Date())
+    }
+
+    private func shortTime(_ date: Date) -> String {
+        let f = DateFormatter()
+        f.timeStyle = .short
+        f.dateStyle = .none
+        return f.string(from: date)
     }
 }
 

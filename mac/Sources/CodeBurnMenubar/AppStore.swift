@@ -1405,7 +1405,11 @@ final class AppStore {
             case .loading: return kimiUsage == nil ? .loading : .stale
             case .loaded: return .connected
             case .failed: return kimiUsage == nil ? .loading : .stale
-            case let .terminalFailure(reason): return .terminalFailure(reason: reason)
+            // Kimi tokens expire ~every 15 min and only the CLI renews them, so
+            // terminal is the steady state between CLI uses. Keep the last-known
+            // bars (marked stale) instead of flapping the chip to a reconnect
+            // card; the reconnect card is reserved for the genuinely-no-data case.
+            case let .terminalFailure(reason): return kimiUsage == nil ? .terminalFailure(reason: reason) : .stale
             case .transientFailure: return .transientFailure
             }
         }()
