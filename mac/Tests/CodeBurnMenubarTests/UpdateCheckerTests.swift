@@ -59,6 +59,44 @@ struct UpdateCheckerTests {
     }
 }
 
+@Suite("Update failure presentation")
+@MainActor
+struct UpdateFailurePresentationTests {
+    @Test("identifies an automatic update check failure")
+    func updateCheckFailure() {
+        let checker = UpdateChecker()
+        checker.updateFailureStage = .check
+        checker.updateError = "GitHub returned HTTP 403."
+
+        #expect(checker.updateBadgeLabel == "Update Check Failed")
+        #expect(checker.updateHelpText.contains("could not check GitHub for updates"))
+        #expect(checker.updateHelpText.contains("GitHub returned HTTP 403."))
+        #expect(checker.updateHelpText.contains("retry the update check"))
+    }
+
+    @Test("distinguishes CLI update failures")
+    func cliUpdateFailure() {
+        let checker = UpdateChecker()
+        checker.updateFailureStage = .cliUpdate
+        checker.updateError = "npm exited with status 1."
+
+        #expect(checker.updateBadgeLabel == "CLI Update Failed")
+        #expect(checker.updateHelpText.contains("could not update the CLI"))
+        #expect(checker.updateHelpText.contains("npm exited with status 1."))
+    }
+
+    @Test("distinguishes menubar update failures")
+    func menubarUpdateFailure() {
+        let checker = UpdateChecker()
+        checker.updateFailureStage = .menubarUpdate
+        checker.updateError = "Checksum mismatch."
+
+        #expect(checker.updateBadgeLabel == "Menubar Update Failed")
+        #expect(checker.updateHelpText.contains("could not update the menubar app"))
+        #expect(checker.updateHelpText.contains("Checksum mismatch."))
+    }
+}
+
 
 // MARK: - one-click full update: package-manager resolution
 

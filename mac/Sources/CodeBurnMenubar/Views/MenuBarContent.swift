@@ -520,7 +520,9 @@ private struct UpdateBadge: View {
 
     var body: some View {
         Button {
-            if updateChecker.updateAvailable || updateChecker.cliUpdateAvailable {
+            if updateChecker.updateFailureStage == .check {
+                Task { await updateChecker.check() }
+            } else if updateChecker.updateAvailable || updateChecker.cliUpdateAvailable {
                 updateChecker.performFullUpdate()
             } else {
                 Task { await updateChecker.check() }
@@ -538,7 +540,7 @@ private struct UpdateBadge: View {
                     Image(systemName: "arrow.down.circle.fill")
                         .font(.system(size: 10))
                 }
-                Text(updateChecker.isUpdating ? "Updating..." : (updateChecker.updateError == nil ? "Update" : "Failed"))
+                Text(updateChecker.updateBadgeLabel)
                     .font(.system(size: 10, weight: .medium))
             }
             .padding(.horizontal, 8)
@@ -548,7 +550,9 @@ private struct UpdateBadge: View {
         .tint(Theme.brandAccent)
         .controlSize(.mini)
         .disabled(updateChecker.isUpdating)
-        .help(updateChecker.updateError ?? "Update the CLI and menubar to the latest release")
+        .help(updateChecker.updateHelpText)
+        .accessibilityLabel(updateChecker.updateBadgeLabel)
+        .accessibilityHint(updateChecker.updateHelpText)
     }
 }
 
