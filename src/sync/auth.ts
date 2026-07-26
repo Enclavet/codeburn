@@ -149,7 +149,14 @@ export interface CallbackResult {
  * is served once from a throwaway localhost server, so it must not depend
  * on network fonts, external CSS, or dashboard assets.
  */
-export function renderCallbackPage(ok: boolean, title: string, message: string): string {
+export function renderCallbackPage(ok: boolean, rawTitle: string, rawMessage: string): string {
+  // Current call sites pass literals, but escape anyway so a future caller
+  // interpolating IdP-influenced text (e.g. the callback `error` param) cannot
+  // turn this localhost page into an XSS sink.
+  const escapeHtml = (s: string) => s.replace(/[&<>"']/g, c =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!)
+  const title = escapeHtml(rawTitle)
+  const message = escapeHtml(rawMessage)
   const accent = ok ? '#1f8a5b' : '#c8541f' // --primary / --chart-5 (terracotta)
   const mark = ok ? '&#10003;' : '&#10005;' // ✓ / ✕
   return `<!doctype html>
