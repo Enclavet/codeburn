@@ -46,10 +46,9 @@ export function showEmptyState(projectCount: number, scrollableHistory: boolean,
   return historyProjectCount === 0 && !historyLoading
 }
 
-// The By Model panel now carries six numeric columns. Keep panels stacked until
-// each half has enough room for those columns instead of truncating Tok/s at
-// ordinary 100–120 column terminals.
-const MIN_WIDE = 130
+// The By Model panel drops the Tok/s column when the panel is too narrow, so
+// the wider two-column layout can still activate at ordinary terminal widths.
+const MIN_WIDE = 90
 const ORANGE = '#FF8C42'
 const DIM = '#555555'
 const GOLD = '#FFD700'
@@ -198,9 +197,9 @@ function nextTick(): Promise<void> {
   return new Promise(resolve => setImmediate(resolve))
 }
 
-type Layout = { dashWidth: number; wide: boolean; halfWidth: number; barWidth: number }
+export type Layout = { dashWidth: number; wide: boolean; halfWidth: number; barWidth: number }
 
-function getLayout(columns?: number): Layout {
+export function getLayout(columns?: number): Layout {
   const termWidth = columns || parseInt(process.env['COLUMNS'] ?? '') || 80
   const dashWidth = Math.min(160, termWidth)
   const wide = dashWidth >= MIN_WIDE
@@ -453,6 +452,9 @@ function ModelBreakdown({ projects, pw, bw }: { projects: ProjectSummary[]; pw: 
   const modelEfficiency = aggregateModelEfficiency(projects)
   const anyEstimated = Object.values(modelTotals).some(d => d.estimatedCostUSD > 0)
   const anyActiveTiming = Object.values(modelTotals).some(d => d.activeDurationMs > 0 && d.activeGeneratedTokens > 0)
+  // The Tok/s column needs 61 inner columns for the full row; hide it on narrower
+  // panels and when no model has timing data (non-Codex users get no dead column).
+  const showTps = pw - PANEL_CHROME >= 61 && anyActiveTiming
   const sorted = Object.entries(modelTotals).sort(([, a], [, b]) => b.costUSD - a.costUSD)
   const maxCost = sorted[0]?.[1]?.costUSD ?? 0
   const unpriced = findUnpricedModels(Object.entries(modelTotals).map(([model, d]) => ({
@@ -464,7 +466,7 @@ function ModelBreakdown({ projects, pw, bw }: { projects: ProjectSummary[]; pw: 
 
   return (
     <Panel title="By Model" color={PANEL_COLORS.model} width={pw}>
-      <Text dimColor wrap="truncate-end">{''.padEnd(bw + 1 + MODEL_NAME_WIDTH)}{'cost'.padStart(MODEL_COL_COST)}{'cache'.padStart(MODEL_COL_CACHE)}{'calls'.padStart(MODEL_COL_CALLS)}{'1-shot'.padStart(MODEL_COL_ONESHOT)}{'Tok/s'.padStart(MODEL_COL_TPS)}</Text>
+      <Text dimColor wrap="truncate-end">{''.padEnd(bw + 1 + MODEL_NAME_WIDTH)}{'cost'.padStart(MODEL_COL_COST)}{'cache'.padStart(MODEL_COL_CACHE)}{'calls'.padStart(MODEL_COL_CALLS)}{'1-shot'.padStart(MODEL_COL_ONESHOT)}{showTps ? 'Tok/s'.padStart(MODEL_COL_TPS) : ''}</Text>
       {sorted.map(([model, data], i) => {
         const totalInput = data.freshInput + data.cacheRead + data.cacheWrite
         const cacheHit = totalInput > 0 ? (data.cacheRead / totalInput) * 100 : 0
@@ -484,7 +486,7 @@ function ModelBreakdown({ projects, pw, bw }: { projects: ProjectSummary[]; pw: 
             <Text>{cacheLabel.padStart(MODEL_COL_CACHE)}</Text>
             <Text>{String(data.calls).padStart(MODEL_COL_CALLS)}</Text>
             <Text>{oneShotLabel.padStart(MODEL_COL_ONESHOT)}</Text>
-            <Text>{tpsLabel.padStart(MODEL_COL_TPS)}</Text>
+            {showTps && <Text>{tpsLabel.padStart(MODEL_COL_TPS)}</Text>}
           </Text>
         )
       })}
@@ -496,7 +498,7 @@ function ModelBreakdown({ projects, pw, bw }: { projects: ProjectSummary[]; pw: 
       {anyEstimated && (
         <Text dimColor wrap="truncate-end">~ estimated cost (priced from estimated tokens)</Text>
       )}
-      {anyActiveTiming && (
+      {showTps && (
         <Text dimColor wrap="truncate-end">~ Tok/s: generated tokens / active time; tool wait excluded</Text>
       )}
     </Panel>

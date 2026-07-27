@@ -438,7 +438,11 @@ function parseCodexLine(line: string | Buffer): CodexEntry | null {
       invocation,
       call_id: getRawJsonStringField(pHead, 'call_id'),
       turn_id: getRawJsonStringField(pHead, 'turn_id'),
-      duration_ms: timingNumber('duration_ms') ?? timingDuration,
+      // On mcp_tool_call_end a coincidental `duration_ms` inside the large
+      // invocation.arguments object can shadow the payload-level duration, so the
+      // depth-aware value wins. The naive scan stays as the fallback for
+      // task_complete, which records duration_ms at the payload level directly.
+      duration_ms: timingDuration ?? timingNumber('duration_ms'),
       started_at: timingNumber('started_at'),
       info: compactInfo,
     },
@@ -453,47 +457,33 @@ function parseCodexLine(line: string | Buffer): CodexEntry | null {
   return entry
 }
 
-type DiscoveredCodexSession = {
-  source: SessionSource
-  sessionId?: string
-}
-
-async function discoverSessionFile(filePath: string): Promise<DiscoveredCodexSession | null> {
+async function discoverSessionFile(filePath: string): Promise<SessionSource | null> {
   const s = await stat(filePath).catch(() => null)
   if (!s?.isFile()) return null
 
+  // Fast path: cached results already know the project, so avoid opening the
+  // file. This keeps discovery cheap on large session directories.
   const cachedProject = await getCachedCodexProject(filePath)
-  const { valid, meta } = await isValidCodexSession(filePath)
   if (cachedProject) {
-    return {
-      source: { path: filePath, project: cachedProject, provider: 'codex' },
-      sessionId: valid ? meta?.payload?.session_id : undefined,
-    }
+    return { path: filePath, project: cachedProject, provider: 'codex' }
   }
 
+  const { valid, meta } = await isValidCodexSession(filePath)
   if (!valid || !meta) return null
 
   const cwd = meta.payload?.cwd ?? 'unknown'
-  return {
-    source: { path: filePath, project: sanitizeProject(cwd), provider: 'codex' },
-    sessionId: meta.payload?.session_id,
-  }
+  return { path: filePath, project: sanitizeProject(cwd), provider: 'codex' }
 }
 
 async function discoverSessionsInDir(codexDir: string): Promise<SessionSource[]> {
   const sources: SessionSource[] = []
-  // A rollout can exist in both roots during/after archiving. The active root
-  // is scanned first, and session_id keeps the archived copy from resurfacing.
-  const seenSessionIds = new Set<string>()
+  // Codex archives a session by moving it from sessions/YYYY/MM/DD/ to
+  // archived_sessions/, keeping the same basename. Deduplicate by basename so
+  // a session does not appear twice while it exists in both roots. This avoids
+  // reading every file to extract session_id and preserves the cheap cached
+  // fast path.
+  const seenBasenames = new Set<string>()
   const sessionsDir = join(codexDir, 'sessions')
-
-  const addSession = (discovered: DiscoveredCodexSession | null): void => {
-    if (!discovered) return
-    const sessionId = discovered.sessionId?.trim()
-    if (sessionId && seenSessionIds.has(sessionId)) return
-    if (sessionId) seenSessionIds.add(sessionId)
-    sources.push(discovered.source)
-  }
 
   const years = await readdir(sessionsDir).catch(() => [] as string[])
 
@@ -514,8 +504,10 @@ async function discoverSessionsInDir(codexDir: string): Promise<SessionSource[]>
 
         for (const file of files) {
           if (!file.startsWith('rollout-') || !file.endsWith('.jsonl')) continue
-          const filePath = join(dayDir, file)
-          addSession(await discoverSessionFile(filePath))
+          if (seenBasenames.has(file)) continue
+          seenBasenames.add(file)
+          const source = await discoverSessionFile(join(dayDir, file))
+          if (source) sources.push(source)
         }
       }
     }
@@ -523,11 +515,16 @@ async function discoverSessionsInDir(codexDir: string): Promise<SessionSource[]>
 
   // Codex moves archived sessions into a flat directory. Keep them in usage
   // reports so archiving a conversation does not erase its historical usage.
+  // Call-level deduplication (seenKeys) already collapses any remaining
+  // archived copies, while basename dedup above prevents double discovery.
   const archivedDir = join(codexDir, 'archived_sessions')
   const archivedFiles = await readdir(archivedDir).catch(() => [] as string[])
   for (const file of archivedFiles) {
     if (!file.startsWith('rollout-') || !file.endsWith('.jsonl')) continue
-    addSession(await discoverSessionFile(join(archivedDir, file)))
+    if (seenBasenames.has(file)) continue
+    seenBasenames.add(file)
+    const source = await discoverSessionFile(join(archivedDir, file))
+    if (source) sources.push(source)
   }
 
   return sources

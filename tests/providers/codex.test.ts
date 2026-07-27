@@ -551,6 +551,39 @@ describe('codex provider - JSONL parsing', () => {
     expect(calls[0]).toMatchObject({ tools: ['mcp__github__get_issue'], activeDurationMs: 7000, toolWaitMs: 3000 })
   })
 
+  it('prefers payload-level duration over a nested duration_ms in large mcp_tool_call_end lines', async () => {
+    // Regression guard: a naive first-match regex would pick up the
+    // `duration_ms: 9999` inside invocation.arguments instead of the payload-level
+    // `duration: { secs: 3 }`. The depth-aware payload scan must win.
+    const largeMcpLine = JSON.stringify({
+      type: 'event_msg',
+      timestamp: '2026-04-14T10:00:05Z',
+      payload: {
+        type: 'mcp_tool_call_end',
+        call_id: 'mcp-duration-collision',
+        invocation: { server: 'github', tool: 'get_issue', arguments: { duration_ms: 9999, body: 'x'.repeat(40_000) } },
+        duration: { secs: 3, nanos: 0 },
+        result: { Ok: { content: [{ type: 'text', text: 'x'.repeat(40_000) }] } },
+      },
+    })
+    const filePath = await writeSession(tmpDir, '2026-04-14', 'rollout-mcp-duration-collision.jsonl', [
+      sessionMeta({ session_id: 'sess-mcp-duration-collision', model: 'gpt-5.5' }),
+      JSON.stringify({ type: 'event_msg', timestamp: '2026-04-14T10:00:00Z', payload: { type: 'task_started' } }),
+      userMessage('look up the issue'),
+      largeMcpLine,
+      tokenCount({ timestamp: '2026-04-14T10:00:08Z', last: { input: 300, output: 100 }, total: { total: 400 } }),
+      JSON.stringify({ type: 'event_msg', timestamp: '2026-04-14T10:00:10Z', payload: { type: 'task_complete', duration_ms: 10_000 } }),
+    ])
+
+    const provider = createCodexProvider(tmpDir)
+    const source = { path: filePath, project: 'test', provider: 'codex' }
+    const calls: ParsedProviderCall[] = []
+    for await (const call of provider.createSessionParser(source, new Set()).parse()) calls.push(call)
+
+    expect(calls).toHaveLength(1)
+    expect(calls[0]).toMatchObject({ tools: ['mcp__github__get_issue'], activeDurationMs: 7000, toolWaitMs: 3000 })
+  })
+
   it('omits active timing when recorded tool wait consumes the task duration', async () => {
     const filePath = await writeSession(tmpDir, '2026-04-14', 'rollout-degenerate-timing.jsonl', [
       sessionMeta({ session_id: 'sess-degenerate-timing', model: 'gpt-5.5' }),
