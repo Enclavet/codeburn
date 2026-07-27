@@ -7,8 +7,9 @@
 import type { Command } from 'commander'
 import { randomBytes } from 'crypto'
 
-import { fetchDiscoveryDoc } from './discovery.js'
+import { fetchDiscoveryDoc, DiscoveryError } from './discovery.js'
 import {
+  AuthError,
   fetchOidcConfig,
   generatePkce,
   buildAuthUrl,
@@ -33,100 +34,120 @@ export function registerSyncCommands(program: Command): void {
     .command('setup <url>')
     .description('Configure sync with a remote endpoint (one-time)')
     .action(async (url: string) => {
-      const baseUrl = url.replace(/\/$/, '')
-      process.stderr.write(`Fetching discovery doc from ${baseUrl}...\n`)
-
-      // 1. Fetch codeburn discovery doc
-      const discovery = await fetchDiscoveryDoc(baseUrl)
-      process.stderr.write(`  Issuer: ${discovery.issuer}\n`)
-      process.stderr.write(`  Client: ${discovery.client_id}\n`)
-
-      // 2. Fetch OIDC configuration from the issuer
-      const oidc = await fetchOidcConfig(discovery.issuer)
-      process.stderr.write(`  Auth endpoint: ${oidc.authorization_endpoint}\n`)
-
-      // 3. Resolve scopes
-      const scopes = resolveScopes(discovery.scopes, oidc.scopes_supported)
-
-      // 4. Generate PKCE
-      const pkce = generatePkce()
-      const state = randomBytes(16).toString('hex')
-
-      // 5. Start callback server — await the actually-bound port (port
-      // fallback means it may not be the first in CALLBACK_PORTS)
-      const { promise: callbackPromise, ready } = startCallbackServer(state)
-      const port = await ready
-      const redirectUri = `http://127.0.0.1:${port}/callback`
-
-      // 6. Build auth URL and open browser
-      const authUrl = buildAuthUrl({
-        authorization_endpoint: oidc.authorization_endpoint,
-        client_id: discovery.client_id,
-        redirect_uri: redirectUri,
-        scopes,
-        state,
-        pkce,
-      })
-
-      process.stderr.write(`\nOpening browser for login...\n`)
-      process.stderr.write(`If the browser doesn't open, visit:\n  ${authUrl}\n\n`)
-
-      // Open browser (best-effort, platform-specific).
-      // execFileSync with args array — authUrl comes from the remote discovery
-      // doc so it must never be shell-interpolated. Scheme is also validated.
       try {
-        if (!/^https:\/\//.test(authUrl)) {
-          throw new Error('auth URL must be https')
+        const baseUrl = url.replace(/\/$/, '')
+        process.stderr.write(`Fetching discovery doc from ${baseUrl}...\n`)
+
+        // 1. Fetch codeburn discovery doc
+        const discovery = await fetchDiscoveryDoc(baseUrl)
+        process.stderr.write(`  Issuer: ${discovery.issuer}\n`)
+        process.stderr.write(`  Client: ${discovery.client_id}\n`)
+
+        // 2. Fetch OIDC configuration from the issuer
+        const oidc = await fetchOidcConfig(discovery.issuer)
+        process.stderr.write(`  Auth endpoint: ${oidc.authorization_endpoint}\n`)
+
+        // 3. Resolve scopes
+        const scopes = resolveScopes(discovery.scopes, oidc.scopes_supported)
+
+        // 4. Generate PKCE
+        const pkce = generatePkce()
+        const state = randomBytes(16).toString('hex')
+
+        // 5. Start callback server — await the actually-bound port (port
+        // fallback means it may not be the first in CALLBACK_PORTS)
+        const { promise: callbackPromise, ready } = startCallbackServer(state)
+        // If all ports are in use, BOTH `ready` and `callbackPromise` reject.
+        // Mark callbackPromise as handled so the second rejection can't crash
+        // the process as an unhandled rejection while we're throwing from
+        // `await ready`. The later `await callbackPromise` still throws.
+        callbackPromise.catch(() => {})
+        const port = await ready
+        const redirectUri = `http://127.0.0.1:${port}/callback`
+
+        // 6. Build auth URL and open browser
+        const authUrl = buildAuthUrl({
+          authorization_endpoint: oidc.authorization_endpoint,
+          client_id: discovery.client_id,
+          redirect_uri: redirectUri,
+          scopes,
+          state,
+          pkce,
+        })
+
+        process.stderr.write(`\nOpening browser for login...\n`)
+        process.stderr.write(`If the browser doesn't open, visit:\n  ${authUrl}\n\n`)
+
+        // Open browser (best-effort, platform-specific).
+        // execFileSync with args array — authUrl comes from the remote discovery
+        // doc so it must never be shell-interpolated. Scheme is also validated.
+        try {
+          if (!/^https:\/\//.test(authUrl)) {
+            throw new Error('auth URL must be https')
+          }
+          const { execFileSync } = await import('child_process')
+          if (process.platform === 'darwin') {
+            execFileSync('open', [authUrl], { stdio: 'ignore' })
+          } else if (process.platform === 'win32') {
+            // Do NOT use `cmd /c start` here: cmd.exe treats `&` as a command
+            // separator, so the auth URL's query string gets truncated at the
+            // first parameter and the IdP sees a bare /authorize request.
+            // rundll32's FileProtocolHandler receives the URL as a plain
+            // process argument with no shell parsing, so `&` survives intact.
+            execFileSync('rundll32', ['url.dll,FileProtocolHandler', authUrl], { stdio: 'ignore' })
+          } else {
+            execFileSync('xdg-open', [authUrl], { stdio: 'ignore' })
+          }
+        } catch {
+          // Browser open failed — user sees the URL above
         }
-        const { execFileSync } = await import('child_process')
-        if (process.platform === 'darwin') {
-          execFileSync('open', [authUrl], { stdio: 'ignore' })
-        } else if (process.platform === 'win32') {
-          // `start` is a cmd builtin; empty first arg is the window title
-          execFileSync('cmd', ['/c', 'start', '', authUrl], { stdio: 'ignore' })
+
+        // 7. Wait for callback
+        process.stderr.write(`Waiting for login (5 min timeout)...\n`)
+        const callback = await callbackPromise
+
+        // 8. Exchange code for tokens
+        const tokenRedirectUri = `http://127.0.0.1:${callback.port}/callback`
+        const tokens = await exchangeCode(
+          oidc.token_endpoint,
+          callback.code,
+          pkce.code_verifier,
+          tokenRedirectUri,
+          discovery.client_id,
+        )
+
+        if (!tokens.refresh_token) {
+          process.stderr.write(`Warning: IdP did not return a refresh token. You may need to re-authenticate frequently.\n`)
+        }
+
+        // 9. Store credentials
+        const store = createCredentialStore()
+        if (tokens.refresh_token) {
+          store.store(tokens.refresh_token)
+        }
+
+        // 10. Write config
+        writeSyncConfig({
+          baseUrl,
+          clientId: discovery.client_id,
+          tracesPath: discovery.traces_path,
+          issuer: discovery.issuer,
+        })
+
+        process.stderr.write(`\n✓ Sync configured successfully.\n`)
+        process.stderr.write(`  Endpoint: ${baseUrl}\n`)
+        process.stderr.write(`  Token stored in: ${store.method()}\n`)
+        process.stderr.write(`\nRun \`codeburn sync push\` to send telemetry data.\n`)
+      } catch (err) {
+        // Known errors (login timeout, port exhaustion, discovery failures)
+        // get a clean one-line message instead of a raw Node crash dump.
+        if (err instanceof AuthError || err instanceof DiscoveryError) {
+          process.stderr.write(`\nError: ${err.message}\n`)
         } else {
-          execFileSync('xdg-open', [authUrl], { stdio: 'ignore' })
+          process.stderr.write(`\nError: ${(err as Error).stack ?? (err as Error).message}\n`)
         }
-      } catch {
-        // Browser open failed — user sees the URL above
+        process.exit(1)
       }
-
-      // 7. Wait for callback
-      process.stderr.write(`Waiting for login (5 min timeout)...\n`)
-      const callback = await callbackPromise
-
-      // 8. Exchange code for tokens
-      const tokenRedirectUri = `http://127.0.0.1:${callback.port}/callback`
-      const tokens = await exchangeCode(
-        oidc.token_endpoint,
-        callback.code,
-        pkce.code_verifier,
-        tokenRedirectUri,
-        discovery.client_id,
-      )
-
-      if (!tokens.refresh_token) {
-        process.stderr.write(`Warning: IdP did not return a refresh token. You may need to re-authenticate frequently.\n`)
-      }
-
-      // 9. Store credentials
-      const store = createCredentialStore()
-      if (tokens.refresh_token) {
-        store.store(tokens.refresh_token)
-      }
-
-      // 10. Write config
-      writeSyncConfig({
-        baseUrl,
-        clientId: discovery.client_id,
-        tracesPath: discovery.traces_path,
-        issuer: discovery.issuer,
-      })
-
-      process.stderr.write(`\n✓ Sync configured successfully.\n`)
-      process.stderr.write(`  Endpoint: ${baseUrl}\n`)
-      process.stderr.write(`  Token stored in: ${store.method()}\n`)
-      process.stderr.write(`\nRun \`codeburn sync push\` to send telemetry data.\n`)
     })
 
   // --- status ---

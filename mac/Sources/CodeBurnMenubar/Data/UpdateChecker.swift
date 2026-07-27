@@ -14,6 +14,35 @@ private let maxUpdateStderrBytes = 64 * 1024
 // `menubar --force`, so we refuse to run them and ask the user to upgrade the CLI first.
 private let minCliVersionForUpdate = "0.9.9"
 
+enum UpdateFailureStage: Equatable {
+    case check
+    case cliUpdate
+    case menubarUpdate
+
+    var badgeLabel: String {
+        switch self {
+        case .check: "Update Check Failed"
+        case .cliUpdate: "CLI Update Failed"
+        case .menubarUpdate: "Menubar Update Failed"
+        }
+    }
+
+    var summary: String {
+        switch self {
+        case .check: "CodeBurn could not check GitHub for updates."
+        case .cliUpdate: "CodeBurn could not update the CLI."
+        case .menubarUpdate: "CodeBurn could not update the menubar app."
+        }
+    }
+
+    var retryHelp: String {
+        switch self {
+        case .check: "Click to retry the update check."
+        case .cliUpdate, .menubarUpdate: "Click to retry the update."
+        }
+    }
+}
+
 private final class LockedDataBuffer: @unchecked Sendable {
     private let lock = NSLock()
     private var data = Data()
@@ -38,6 +67,19 @@ final class UpdateChecker {
     var installedCliVersion: String?
     var isUpdating = false
     var updateError: String?
+    var updateFailureStage: UpdateFailureStage?
+
+    var updateBadgeLabel: String {
+        if isUpdating { return "Updating..." }
+        return updateFailureStage?.badgeLabel ?? "Update"
+    }
+
+    var updateHelpText: String {
+        guard let error = updateError, let stage = updateFailureStage else {
+            return "Update the CLI and menubar to the latest release"
+        }
+        return "\(stage.summary)\n\n\(error)\n\n\(stage.retryHelp)"
+    }
 
     var updateAvailable: Bool {
         guard let latest = latestVersion else { return false }
@@ -88,6 +130,7 @@ final class UpdateChecker {
 
     func check() async {
         updateError = nil
+        updateFailureStage = nil
         installedCliVersion = Self.queryInstalledCliVersion()
         guard let url = URL(string: releasesAPI) else { return }
         var request = URLRequest(url: url)
@@ -118,7 +161,8 @@ final class UpdateChecker {
             UserDefaults.standard.set(version, forKey: cachedVersionKey)
             if let cliVersion { UserDefaults.standard.set(cliVersion, forKey: cachedCliVersionKey) }
         } catch {
-            updateError = "Update check failed: \(error.localizedDescription)"
+            updateFailureStage = .check
+            updateError = error.localizedDescription
             NSLog("CodeBurn: update check failed: \(error)")
         }
     }
@@ -195,9 +239,11 @@ final class UpdateChecker {
         if cliUpdateAvailable || cliTooOldForUpdate {
             isUpdating = true
             updateError = nil
+            updateFailureStage = nil
             let cliPath = CodeburnCLI.baseArgv().first ?? ""
             guard let argv = Self.cliUpdateInvocation(cliPath: cliPath), let bin = argv.first else {
                 isUpdating = false
+                updateFailureStage = .cliUpdate
                 updateError = "Could not find the package manager for \(cliPath.isEmpty ? "the CLI" : cliPath). Run \u{201C}\(cliUpdateCommand)\u{201D} manually, then try again."
                 return
             }
@@ -209,6 +255,7 @@ final class UpdateChecker {
                     guard let self else { return }
                     if status != 0 {
                         self.isUpdating = false
+                        self.updateFailureStage = .cliUpdate
                         self.updateError = stderr.isEmpty ? "CLI update failed (exit \(status))" : stderr
                         NSLog("CodeBurn: CLI update failed (exit \(status)): \(stderr)")
                         return
@@ -263,11 +310,13 @@ final class UpdateChecker {
     func performUpdate() {
         installedCliVersion = Self.queryInstalledCliVersion()
         if cliTooOldForUpdate {
+            updateFailureStage = .menubarUpdate
             updateError = "Your codeburn CLI (\(AppVersion.display(installedCliVersion ?? ""))) is too old to update the menubar. Run “\(cliUpdateCommand)” first, then try again."
             return
         }
         isUpdating = true
         updateError = nil
+        updateFailureStage = nil
 
         let process = CodeburnCLI.makeProcess(subcommand: ["menubar", "--force"])
         let errPipe = Pipe()
@@ -297,6 +346,7 @@ final class UpdateChecker {
                 guard let self else { return }
                 self.isUpdating = false
                 if proc.terminationStatus != 0 {
+                    self.updateFailureStage = .menubarUpdate
                     self.updateError = stderr.isEmpty ? "Update failed (exit \(proc.terminationStatus))" : stderr
                     NSLog("CodeBurn: update failed (exit \(proc.terminationStatus)): \(stderr)")
                 } else {
@@ -309,6 +359,7 @@ final class UpdateChecker {
             try process.run()
         } catch {
             isUpdating = false
+            updateFailureStage = .menubarUpdate
             updateError = error.localizedDescription
             NSLog("CodeBurn: update spawn failed: \(error)")
         }

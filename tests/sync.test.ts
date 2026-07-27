@@ -10,6 +10,7 @@ import {
   buildAuthUrl,
   resolveScopes,
   startCallbackServer,
+  renderCallbackPage,
   CALLBACK_PORTS,
 } from '../src/sync/auth.js'
 
@@ -256,5 +257,22 @@ describe('syncConfig', () => {
     expect(raw).not.toContain('token')
     expect(raw).not.toContain('secret')
     expect(raw).not.toContain('password')
+  })
+})
+
+// ── Callback Page Escaping ────────────────────────────────────────────
+
+describe('renderCallbackPage', () => {
+  it('escapes HTML metacharacters in title and message', () => {
+    const html = renderCallbackPage(false, '<script>alert(1)</script>', 'a & b "c" \'d\'')
+    expect(html).not.toContain('<script>alert(1)</script>')
+    expect(html).toContain('&lt;script&gt;alert(1)&lt;/script&gt;')
+    expect(html).toContain('a &amp; b &quot;c&quot; &#39;d&#39;')
+  })
+
+  it('leaves literal copy intact', () => {
+    const html = renderCallbackPage(true, 'Login successful', 'You can close this tab.')
+    expect(html).toContain('Login successful')
+    expect(html).toContain('You can close this tab.')
   })
 })

@@ -92,6 +92,10 @@ struct MenuBarContent: View {
 
     private var isFilteredEmpty: Bool {
         guard store.selectedProvider != .all else { return false }
+        // Plan-capable providers keep their sections visible so the Plan tab
+        // (live subscription quota) stays reachable even on days with no
+        // local usage — the quota endpoint doesn't depend on local sessions.
+        if store.selectedProvider == .claude || store.selectedProvider == .codex || store.selectedProvider == .kimiCode { return false }
         if store.payload.current.cost > 0 || store.payload.current.calls > 0 { return false }
         if providerHasCostInAllPayload { return false }
         return true
@@ -520,7 +524,9 @@ private struct UpdateBadge: View {
 
     var body: some View {
         Button {
-            if updateChecker.updateAvailable || updateChecker.cliUpdateAvailable {
+            if updateChecker.updateFailureStage == .check {
+                Task { await updateChecker.check() }
+            } else if updateChecker.updateAvailable || updateChecker.cliUpdateAvailable {
                 updateChecker.performFullUpdate()
             } else {
                 Task { await updateChecker.check() }
@@ -538,7 +544,7 @@ private struct UpdateBadge: View {
                     Image(systemName: "arrow.down.circle.fill")
                         .font(.system(size: 10))
                 }
-                Text(updateChecker.isUpdating ? "Updating..." : (updateChecker.updateError == nil ? "Update" : "Failed"))
+                Text(updateChecker.updateBadgeLabel)
                     .font(.system(size: 10, weight: .medium))
             }
             .padding(.horizontal, 8)
@@ -548,7 +554,9 @@ private struct UpdateBadge: View {
         .tint(Theme.brandAccent)
         .controlSize(.mini)
         .disabled(updateChecker.isUpdating)
-        .help(updateChecker.updateError ?? "Update the CLI and menubar to the latest release")
+        .help(updateChecker.updateHelpText)
+        .accessibilityLabel(updateChecker.updateBadgeLabel)
+        .accessibilityHint(updateChecker.updateHelpText)
     }
 }
 

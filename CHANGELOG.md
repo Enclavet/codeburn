@@ -7,6 +7,8 @@
 
 ### Fixed (CLI)
 - **Codex parser corrections**: fork-replay no longer double-counts `patch_apply_end` and `mcp_tool_call_end`; `exec` is normalized to Bash; `custom_tool_call` events are handled; token_count lines larger than 32 KiB now parse exact token counts instead of estimating. Codex session cache bumps from v7 to v8 for a one-time re-parse. Only tool attribution changes for ordinary sessions, leaving their cost identical; sessions that logged an oversized token_count line are repriced from exact counts instead of an estimate. (#805)
+### Fixed
+- Claude Desktop and Cowork sessions are discovered for Windows Microsoft Store (MSIX) installs. (#611)
 
 ## 0.9.19 - 2026-07-20
 

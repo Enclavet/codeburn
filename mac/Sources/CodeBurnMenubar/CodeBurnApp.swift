@@ -49,11 +49,14 @@ struct CodeBurnApp: App {
 }
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem!
     private var popover: NSPopover!
     private var rightClickMonitor: Any?
     private var lastContextMenuPresentedAt: Date = .distantPast
+    /// Held only while the right-click menu is open. Cleared in menuDidClose so
+    /// left-click goes back to the popover action instead of re-showing the menu.
+    private var contextMenu: NSMenu?
     fileprivate let store = AppStore()
     let updateChecker = UpdateChecker()
     /// True while the displays are asleep. Refresh ticks skip spawning
@@ -519,6 +522,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     fileprivate var lastSubscriptionRefreshAt: Date?
     fileprivate var lastCodexRefreshAt: Date?
+    fileprivate var lastKimiRefreshAt: Date?
     private var claudeQuotaFailureCount = 0
     private var nextClaudeQuotaRefreshAt: Date?
 
@@ -614,8 +618,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         if let task = codexQuotaRefreshTask {
             return await task.value
         }
-        let task = Task { [store] in
-            await store.refreshCodexReportingSuccess()
+        // Kimi Code rides the same tick, but with its own cadence anchor:
+        // when Codex is not connected its refresh returns false immediately,
+        // so lastCodexRefreshAt never advances — anchoring Kimi on it would
+        // poll api.kimi.com on every payload tick instead of the configured
+        // quota cadence. Anchor on attempt (not success) so a failing Kimi
+        // endpoint also respects the cadence.
+        let kimiDue: Bool = {
+            let cadence = SubscriptionRefreshCadence.current
+            guard cadence != .manual else { return false }
+            return Date().timeIntervalSince(lastKimiRefreshAt ?? .distantPast) >= TimeInterval(cadence.rawValue)
+        }()
+        if kimiDue { lastKimiRefreshAt = Date() }
+        let task = Task { [store, kimiDue] in
+            async let codex = store.refreshCodexReportingSuccess()
+            if kimiDue {
+                _ = await store.refreshKimiReportingSuccess()
+            }
+            return await codex
         }
         codexQuotaRefreshTask = task
         let result = await task.value
@@ -833,6 +853,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     func resetSubscriptionCadenceAnchor() {
         lastSubscriptionRefreshAt = nil
         lastCodexRefreshAt = nil
+        lastKimiRefreshAt = nil
         claudeQuotaFailureCount = 0
         nextClaudeQuotaRefreshAt = nil
     }
@@ -909,15 +930,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         button.sendAction(on: [.leftMouseUp, .rightMouseUp])
 
         // macOS 27 no longer routes any right-mouse event to the status-item
-        // button's target/action. A global monitor still observes right-mouse-down;
+        // button's target/action. A global monitor still observes right-mouse-up;
         // we hit-test it against our own status-item window and present the menu
-        // ourselves. Harmless and stable on 15/26 too (the debounce in
-        // showContextMenu prevents a double-present if the legacy path also fires).
-        rightClickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.rightMouseDown]) { [weak self] _ in
+        // ourselves.
+        //
+        // Must be mouse-*up*, not mouse-down: presenting on down starts menu
+        // tracking while the button is still held, so the matching rightMouseUp
+        // is treated as an outside click and the menu flashes then dismisses.
+        // Presenting on up (after the click completes) keeps it open. Harmless
+        // on 15/26 too (the debounce in showContextMenu prevents a double-present
+        // if the legacy path also fires).
+        rightClickMonitor = NSEvent.addGlobalMonitorForEvents(matching: StatusItemContextMenuPolicy.presentEventMask) { [weak self] _ in
             guard let self,
                   let button = self.statusItem.button,
                   let window = button.window,
                   window.frame.contains(NSEvent.mouseLocation) else { return }
+            // Defer one turn so menu presentation is not nested inside the
+            // monitor callback. Safe on mouse-*up* (the click is already
+            // complete); on mouse-down a deferred present was killed by the
+            // matching up event and the menu only flashed.
             DispatchQueue.main.async { self.showContextMenu(from: button) }
         }
 
@@ -1126,9 +1157,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private func showContextMenu(from button: NSStatusBarButton) {
         // Debounce: on macOS <= 26 both the legacy action path and the global
         // monitor can fire for a single right-click. Present at most once per click.
-        let now = Date()
-        guard now.timeIntervalSince(lastContextMenuPresentedAt) > 0.3 else { return }
-        lastContextMenuPresentedAt = now
+        // Policy lives in StatusItemContextMenuPolicy so the gate is unit-tested (#802).
+        guard StatusItemContextMenuPolicy.acceptPresent(
+            now: Date(),
+            lastPresentedAt: &lastContextMenuPresentedAt
+        ) else { return }
+
+        // Don't let an open popover steal the click / sit under the menu.
+        if popover?.isShown == true {
+            popover.performClose(nil)
+        }
 
         let menu = NSMenu()
 
@@ -1160,12 +1198,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         quitItem.target = self
         menu.addItem(quitItem)
 
-        // Present directly. The previous `statusItem.menu = menu; button.performClick`
-        // trick relies on the click -> action path that macOS 27 changed; popUp is
-        // version-stable. Open a few px below the status item so the menu clears the
-        // menu bar: anchoring flush clips the top edge and makes macOS engage menu
-        // scrolling (a scroll chevron appears and the first row slides up on hover).
-        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: button.bounds.height + 6), in: button)
+        // Present via the status item's own menu slot. AppKit positions and tracks
+        // that menu correctly under the status item (no scroll chevron / first-row
+        // jump). Manual NSMenu.popUp(at:in:) is what caused the jump: the menu was
+        // tracked against a point while the cursor still sat on the status item
+        // above it, so the first mouse move engaged scroll mode.
+        //
+        // #472 dropped this pattern because assigning `statusItem.menu` from the
+        // right-mouse *action* never ran on macOS 27 (right-clicks no longer reach
+        // the button action). We still open from our global rightMouseUp monitor
+        // (or the legacy action on ≤26); once we set `statusItem.menu` ourselves,
+        // performClick is just "open the attached menu" and works on 27 too.
+        //
+        // menuDidClose clears `statusItem.menu` so the next left-click hits our
+        // action (popover) instead of re-opening this menu.
+        menu.delegate = self
+        contextMenu = menu
+        statusItem.menu = menu
+        button.performClick(nil)
+    }
+
+    // MARK: - NSMenuDelegate
+
+    // AppKit invokes menu callbacks on the main thread. Clear the status-item
+    // menu slot so the next left-click hits our action (popover) again.
+    nonisolated func menuDidClose(_ menu: NSMenu) {
+        // Hop explicitly — don't assumeIsolated across the NSMenuDelegate boundary
+        // under Swift 6 strict concurrency (NSMenu isn't Sendable).
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            // Always clear: we only ever attach our own context menu to the item.
+            self.statusItem.menu = nil
+            self.contextMenu = nil
+        }
     }
 
     /// One-line "today" summary for the context menu's usage row.

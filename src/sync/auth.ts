@@ -141,6 +141,42 @@ export interface CallbackResult {
   port: number
 }
 
+/**
+ * Themed HTML for the OAuth callback landing page.
+ *
+ * Matches the CodeBurn dashboard theme (dash/src/index.css): warm paper
+ * surfaces, ink text, forest-green accent. Everything is inline — this page
+ * is served once from a throwaway localhost server, so it must not depend
+ * on network fonts, external CSS, or dashboard assets.
+ */
+export function renderCallbackPage(ok: boolean, rawTitle: string, rawMessage: string): string {
+  // Current call sites pass literals, but escape anyway so a future caller
+  // interpolating IdP-influenced text (e.g. the callback `error` param) cannot
+  // turn this localhost page into an XSS sink.
+  const escapeHtml = (s: string) => s.replace(/[&<>"']/g, c =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!)
+  const title = escapeHtml(rawTitle)
+  const message = escapeHtml(rawMessage)
+  const accent = ok ? '#1f8a5b' : '#c8541f' // --primary / --chart-5 (terracotta)
+  const mark = ok ? '&#10003;' : '&#10005;' // ✓ / ✕
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CodeBurn — ${title}</title>
+</head>
+<body style="margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#e9e6de;color:#16181d;font-family:'Geist',system-ui,-apple-system,'Segoe UI',sans-serif;letter-spacing:-0.006em;">
+  <main style="background:#ffffff;border:1px solid rgba(23,27,32,0.08);border-radius:8px;padding:48px 56px;max-width:420px;text-align:center;box-shadow:0 1px 3px rgba(23,27,32,0.06);">
+    <div style="width:56px;height:56px;margin:0 auto 20px;border-radius:50%;background:${accent};color:#ffffff;font-size:28px;line-height:56px;font-weight:700;">${mark}</div>
+    <h1 style="margin:0 0 8px;font-size:20px;font-weight:600;color:#2c5242;">${title}</h1>
+    <p style="margin:0;font-size:15px;color:#5d626b;line-height:1.5;">${message}</p>
+    <p style="margin:28px 0 0;font-size:12px;color:#8a857c;">CodeBurn <span style="color:${accent};">&bull;</span> local sync login</p>
+  </main>
+</body>
+</html>`
+}
+
 export function startCallbackServer(
   expectedState: string,
   timeoutMs: number = 300_000, // 5 minutes
@@ -179,8 +215,8 @@ export function startCallbackServer(
       // Connection: close on every response — the callback server is
       // single-purpose and must never leave pooled keep-alive sockets behind.
       if (error) {
-        res.writeHead(400, { 'Content-Type': 'text/html', 'Connection': 'close' })
-        res.end('<html><body><h1>Login failed</h1><p>You can close this tab.</p></body></html>')
+        res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8', 'Connection': 'close' })
+        res.end(renderCallbackPage(false, 'Login failed', 'The identity provider rejected the login. You can close this tab and retry from the terminal.'))
         clearTimeout(timer)
         shutdown()
         reject(new AuthError(`IdP returned error: ${error}`))
@@ -199,8 +235,8 @@ export function startCallbackServer(
         return
       }
 
-      res.writeHead(200, { 'Content-Type': 'text/html', 'Connection': 'close' })
-      res.end('<html><body><h1>✓ Login successful</h1><p>You can close this tab.</p></body></html>')
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Connection': 'close' })
+      res.end(renderCallbackPage(true, 'Login successful', 'CodeBurn sync is now authenticated. You can close this tab and return to the terminal.'))
       clearTimeout(timer)
       shutdown()
       resolve({ code, port: resolvedPort })
