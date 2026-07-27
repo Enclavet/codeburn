@@ -584,7 +584,12 @@ function createParser(source: SessionSource, seenKeys: Set<string>): SessionPars
       let currentTurnId = `${sessionId}:t0`
       let sawAnyLine = false
       const results: ParsedProviderCall[] = []
-      let taskResultStart = 0
+      // Calls decoded since the last task_started, held back so task_complete can
+      // stamp active/toolWait timing before they are appended to results. Emitting
+      // a task only once its timing is known keeps single-pass and split/resume
+      // decodes in agreement instead of back-patching already-emitted calls.
+      // Bounded by one task's calls; flushed at the next task_started and at EOF.
+      let pendingTaskCalls: ParsedProviderCall[] = []
       let taskGeneratedTokens = 0
       let taskToolIntervals: Array<[number, number]> = []
       let taskStartedAt: number | undefined
@@ -629,7 +634,10 @@ function createParser(source: SessionSource, seenKeys: Set<string>): SessionPars
         )) continue
 
         if (entry.type === 'event_msg' && entry.payload?.type === 'task_started') {
-          taskResultStart = results.length
+          // Emit the previous task. If it never reached task_complete its timing
+          // fields simply stay unset, matching the un-buffered behaviour.
+          results.push(...pendingTaskCalls)
+          pendingTaskCalls = []
           taskGeneratedTokens = 0
           taskToolIntervals = []
           const startedAt = entry.timestamp ? Date.parse(entry.timestamp) : NaN
@@ -678,7 +686,7 @@ function createParser(source: SessionSource, seenKeys: Set<string>): SessionPars
 
         if (entry.type === 'event_msg' && entry.payload?.type === 'task_complete') {
           const durationMs = entry.payload.duration_ms
-          if (typeof durationMs === 'number' && durationMs > 0 && taskGeneratedTokens > 0 && taskResultStart < results.length) {
+          if (typeof durationMs === 'number' && durationMs > 0 && taskGeneratedTokens > 0 && pendingTaskCalls.length > 0) {
             const completedAt = entry.timestamp ? Date.parse(entry.timestamp) : NaN
             const windowStart = taskStartedAt ?? (Number.isFinite(completedAt) ? completedAt - durationMs : undefined)
             const windowEnd = windowStart !== undefined ? windowStart + durationMs : undefined
@@ -695,8 +703,7 @@ function createParser(source: SessionSource, seenKeys: Set<string>): SessionPars
             const toolWaitMs = Math.min(durationMs, merged.reduce((sum, interval) => sum + interval[1] - interval[0], 0))
             const activeMs = durationMs - toolWaitMs
             if (activeMs <= 0) continue
-            for (let i = taskResultStart; i < results.length; i++) {
-              const call = results[i]!
+            for (const call of pendingTaskCalls) {
               const generated = call.outputTokens + call.reasoningTokens
               if (generated <= 0) continue
               call.activeGeneratedTokens = generated
@@ -791,7 +798,7 @@ function createParser(source: SessionSource, seenKeys: Set<string>): SessionPars
 
             const costUSD = calculateCost(model, estInput, estOutput, 0, 0, 0)
 
-            results.push({
+            pendingTaskCalls.push({
               provider: 'codex',
               model,
               inputTokens: estInput,
@@ -910,7 +917,7 @@ function createParser(source: SessionSource, seenKeys: Set<string>): SessionPars
             0,
           )
 
-          results.push({
+          pendingTaskCalls.push({
             provider: 'codex',
             model,
             inputTokens: uncachedInputTokens,
@@ -951,6 +958,9 @@ function createParser(source: SessionSource, seenKeys: Set<string>): SessionPars
       // empty. Skip cache write so a transient failure can't pin an empty
       // result set against a fingerprint that would otherwise be re-parsed.
       if (!sawAnyLine) return
+
+      // Flush the final task, which has no following task_started to trigger it.
+      results.push(...pendingTaskCalls)
 
       await writeCachedCodexResults(source.path, source.project, results, fp)
 

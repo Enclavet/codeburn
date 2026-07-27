@@ -584,6 +584,38 @@ describe('codex provider - JSONL parsing', () => {
     expect(calls[0]).toMatchObject({ tools: ['mcp__github__get_issue'], activeDurationMs: 7000, toolWaitMs: 3000 })
   })
 
+  it('attributes a task_complete over everything since the last task_started, even across a suppressed one', async () => {
+    // A mid-file session_meta carrying forked_from_id re-arms the fork-replay
+    // cutoff, which swallows the task_started right behind it while its
+    // task_complete lands past the cutoff. Attribution then has to span both
+    // turns, exactly as it did before calls were buffered per task.
+    const filePath = await writeSession(tmpDir, '2026-04-14', 'rollout-suppressed-task-start.jsonl', [
+      sessionMeta({ session_id: 'sess-suppressed-start', model: 'gpt-5.5' }),
+      JSON.stringify({ type: 'event_msg', timestamp: '2026-04-14T10:00:00Z', payload: { type: 'task_started' } }),
+      userMessage('first ask'),
+      tokenCount({ timestamp: '2026-04-14T10:00:05Z', last: { input: 300, output: 100 }, total: { total: 400 } }),
+      JSON.stringify({ type: 'event_msg', timestamp: '2026-04-14T10:00:10Z', payload: { type: 'task_complete', duration_ms: 10_000 } }),
+      sessionMeta({ timestamp: '2026-04-14T10:00:11Z', session_id: 'sess-suppressed-start', model: 'gpt-5.5', forked_from_id: 'sess-parent' }),
+      JSON.stringify({ type: 'event_msg', timestamp: '2026-04-14T10:00:12Z', payload: { type: 'task_started' } }),
+      userMessage('second ask', '2026-04-14T10:00:18Z'),
+      tokenCount({ timestamp: '2026-04-14T10:00:20Z', last: { input: 300, output: 300 }, total: { total: 1000 } }),
+      JSON.stringify({ type: 'event_msg', timestamp: '2026-04-14T10:00:25Z', payload: { type: 'task_complete', duration_ms: 5_000 } }),
+    ])
+
+    const provider = createCodexProvider(tmpDir)
+    const source = { path: filePath, project: 'test', provider: 'codex' }
+    const calls: ParsedProviderCall[] = []
+    for await (const call of provider.createSessionParser(source, new Set()).parse()) calls.push(call)
+
+    expect(calls).toHaveLength(2)
+    // The second task_complete re-attributes the first turn too, so the 5s
+    // window is split across both by generated tokens rather than leaving the
+    // first turn pinned to its own 10s window.
+    expect(calls[0]!.activeDurationMs).toBeCloseTo(1250, 6)
+    expect(calls[1]!.activeDurationMs).toBeCloseTo(3750, 6)
+    expect(calls[0]!.activeDurationMs! + calls[1]!.activeDurationMs!).toBeCloseTo(5000, 6)
+  })
+
   it('omits active timing when recorded tool wait consumes the task duration', async () => {
     const filePath = await writeSession(tmpDir, '2026-04-14', 'rollout-degenerate-timing.jsonl', [
       sessionMeta({ session_id: 'sess-degenerate-timing', model: 'gpt-5.5' }),
