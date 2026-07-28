@@ -2987,17 +2987,22 @@ async function parseProviderSources(
     const cachedFile = section.files[source.path]
     if (!cachedFile) continue
 
-    for (const turn of cachedFile.turns) {
+    for (let turn of cachedFile.turns) {
       const hasDup = turn.calls.some(c => seenKeys.has(c.deduplicationKey))
       if (hasDup) continue
 
       for (const c of turn.calls) seenKeys.add(c.deduplicationKey)
 
       if (dateRange) {
-        const callTs = turn.calls[0]?.timestamp
-        if (!callTs) continue
-        const ts = new Date(callTs)
-        if (ts < dateRange.start || ts > dateRange.end) continue
+        // Filter per call, not by the turn's first call: a long autonomous turn
+        // can span midnight, so dropping the whole turn on its first timestamp
+        // loses every in-range call made after it.
+        const inRangeCalls = turn.calls.filter(c => {
+          const ts = new Date(c.timestamp).getTime()
+          return !isNaN(ts) && ts >= dateRange.start.getTime() && ts <= dateRange.end.getTime()
+        })
+        if (inRangeCalls.length === 0) continue
+        turn = { ...turn, calls: inRangeCalls }
       }
 
       const classified = cachedTurnToClassified(turn)
@@ -3036,17 +3041,22 @@ async function parseProviderSources(
     for (const [cachedPath, cachedFile] of Object.entries(section.files)) {
       if (allDiscoveredFiles.has(cachedPath)) continue  // already counted above
 
-      for (const turn of cachedFile.turns) {
+      for (let turn of cachedFile.turns) {
         const hasDup = turn.calls.some(c => seenKeys.has(c.deduplicationKey))
         if (hasDup) continue
 
         for (const c of turn.calls) seenKeys.add(c.deduplicationKey)
 
         if (dateRange) {
-          const callTs = turn.calls[0]?.timestamp
-          if (!callTs) continue
-          const ts = new Date(callTs)
-          if (ts < dateRange.start || ts > dateRange.end) continue
+          // Filter per call, not by the turn's first call: a long autonomous turn
+          // can span midnight, so dropping the whole turn on its first timestamp
+          // loses every in-range call made after it.
+          const inRangeCalls = turn.calls.filter(c => {
+            const ts = new Date(c.timestamp).getTime()
+            return !isNaN(ts) && ts >= dateRange.start.getTime() && ts <= dateRange.end.getTime()
+          })
+          if (inRangeCalls.length === 0) continue
+          turn = { ...turn, calls: inRangeCalls }
         }
 
         const classified = cachedTurnToClassified(turn)
