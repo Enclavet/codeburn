@@ -153,6 +153,9 @@ export type ParsedApiCall = {
   /// Count of this call's tool results flagged `is_error` (Claude tool_result
   /// blocks). Bash stderr alone is NOT counted (warnings go there). Omitted at 0.
   toolErrors?: number
+  activeDurationMs?: number
+  activeGeneratedTokens?: number
+  toolWaitMs?: number
 }
 
 export type ToolCall = {
@@ -268,7 +271,7 @@ export type SessionSummary = {
   /// from a provider that never captures branches (→ contributes nothing).
   /// Claude only; absent otherwise.
   everHadBranch?: boolean
-  modelBreakdown: Record<string, { calls: number; costUSD: number; tokens: TokenUsage; savingsUSD: number; estimatedCostUSD?: number }>
+  modelBreakdown: Record<string, { calls: number; costUSD: number; tokens: TokenUsage; savingsUSD: number; estimatedCostUSD?: number; activeDurationMs?: number; activeGeneratedTokens?: number; toolWaitMs?: number }>
   toolBreakdown: Record<string, { calls: number }>
   mcpBreakdown: Record<string, { calls: number }>
   bashBreakdown: Record<string, { calls: number }>
