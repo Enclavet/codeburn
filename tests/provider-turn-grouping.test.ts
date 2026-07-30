@@ -229,6 +229,10 @@ describe('provider turn range filtering', () => {
       expect(turn.assistantCalls.map(call => new Date(call.timestamp).toISOString())).toEqual([
         '2026-05-16T00:15:00.000Z',
       ])
+      // The slice re-anchors the turn's timestamp from the user-message time
+      // (2026-05-15T23:57Z) to the first surviving call, so turn-anchored
+      // bucketing lands the slice on the day its calls actually fall in.
+      expect(new Date(turn.timestamp).toISOString()).toBe('2026-05-16T00:15:00.000Z')
       expect(session.totalInputTokens).toBe(80)
       expect(session.totalOutputTokens).toBe(20)
     } finally {
