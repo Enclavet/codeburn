@@ -97,6 +97,9 @@ export type OverviewDurable = {
   cacheWriteTokens: number
   days: DailyEntry[]
   carriedCostUSD: number
+  /// Cost a --project/--exclude filter could not attribute (cached days with no
+  /// per-project split). Optional so callers that never filter can omit it.
+  unattributedCostUSD?: number
 }
 
 export function renderOverview(
@@ -348,6 +351,13 @@ export function renderOverview(
   // cache); it just can't be re-derived from surviving files anymore.
   if (durable && durable.carriedCostUSD > 0) {
     out.push(c.dim(`  includes ${formatCost(durable.carriedCostUSD)} preserved from expired session logs`))
+  }
+
+  // A project filter cannot claim days the cache holds without a project split
+  // (recorded before that split existed), so they sit outside this total. Say how
+  // much rather than let the filtered figure look inexplicably short.
+  if (durable && (durable.unattributedCostUSD ?? 0) > 0) {
+    out.push(c.dim(`  excludes ${formatCost(durable.unattributedCostUSD!)} from days with no per-project history`))
   }
 
   return out.join('\n') + '\n'
