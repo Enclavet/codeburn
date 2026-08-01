@@ -5,7 +5,6 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 
 import { DAILY_CACHE_VERSION, currentTzKey, type DailyCache, type DailyEntry } from '../src/daily-cache.js'
-import { getDateRange } from '../src/cli-date.js'
 import { loadPricing } from '../src/models.js'
 import { buildDurablePeriod, buildMenubarPayloadForRange, buildPeriodData, getDailyCacheConfigHash } from '../src/usage-aggregator.js'
 import { parseAllSessions, filterProjectsByName, clearSessionCache } from '../src/parser.js'
@@ -148,13 +147,20 @@ afterEach(async () => {
   if (existsSync(ROOT)) await rm(ROOT, { recursive: true, force: true })
 })
 
-const monthRange = (): DateRange => getDateRange('month').range
+// A fixed 20-day window back from now: it always spans the carried day (10 days
+// ago) and today, so the period never depends on where "now" falls in the
+// calendar. A real `month` range drops the 10-days-ago day whenever today is
+// within 10 days of the 1st, which made these tests flake early in each month.
+const coveringRange = (): DateRange => ({
+  start: new Date(Date.now() - 20 * 24 * 60 * 60 * 1000),
+  end: new Date(),
+})
 
 describe('durable headline honours --project / --exclude on carried days', () => {
   it('drops an excluded project from the headline so it reconciles with the By Project panel', async () => {
     await seedCache(carriedDayWithProjects(daysAgoStr(10)))
     await seedLiveTodaySession()
-    const range = monthRange()
+    const range = coveringRange()
 
     const live = await liveOnly(range, [], ['drop-me'])
     clearSessionCache()
@@ -172,7 +178,7 @@ describe('durable headline honours --project / --exclude on carried days', () =>
   it('keeps only the named project when --project is given', async () => {
     await seedCache(carriedDayWithProjects(daysAgoStr(10)))
     await seedLiveTodaySession()
-    const range = monthRange()
+    const range = coveringRange()
 
     const live = await liveOnly(range, ['keep-me'], [])
     clearSessionCache()
@@ -185,7 +191,7 @@ describe('durable headline honours --project / --exclude on carried days', () =>
   it('matches a filter against the project path as well as its name', async () => {
     await seedCache(carriedDayWithProjects(daysAgoStr(10)))
     await seedLiveTodaySession()
-    const range = monthRange()
+    const range = coveringRange()
 
     const live = await liveOnly(range, [], ['/Users/gone/drop-me'])
     clearSessionCache()
@@ -194,10 +200,35 @@ describe('durable headline honours --project / --exclude on carried days', () =>
     expect(durable.data.cost).toBeCloseTo(live.cost + KEEP.cost, 6)
   })
 
+  it('keeps a project whose name is a prototype member (constructor) in the sliced total', async () => {
+    // A project directory can legitimately be named "constructor"/"valueOf"/etc.
+    // The day cache must carry it as an own key: if the load path drops it, the
+    // day's per-project split no longer sums to the day cost, and the sliced
+    // headline silently loses that project's spend.
+    const day = carriedDayWithProjects(daysAgoStr(10))
+    const protoName = 'constructor'
+    Object.defineProperty(day.projects!, protoName, {
+      value: { cost: 25, calls: 5, savingsUSD: 0, sessions: 1, path: '/Users/gone/constructor' },
+      enumerable: true, writable: true, configurable: true,
+    })
+    day.cost += 25
+    day.calls += 5
+    await seedCache(day)
+    await seedLiveTodaySession()
+    const range = coveringRange()
+
+    // Keep everything (exclude a non-matching term): the constructor project's
+    // $25 must be present alongside keep-me and drop-me.
+    const durable = await buildDurablePeriod({ range, label: 'p' }, { provider: 'all', exclude: ['zzz-nomatch'] })
+    const live = await liveOnly(range, [], ['zzz-nomatch'])
+    expect(durable.data.cost).toBeCloseTo(live.cost + DAY_COST + 25, 6)
+    expect(durable.unattributedCostUSD).toBe(0)
+  })
+
   it('contributes nothing from a carried day whose every project is excluded', async () => {
     await seedCache(carriedDayWithProjects(daysAgoStr(10)))
     await seedLiveTodaySession()
-    const range = monthRange()
+    const range = coveringRange()
 
     const live = await liveOnly(range, [], ['keep-me', 'drop-me'])
     clearSessionCache()
@@ -210,7 +241,7 @@ describe('durable headline honours --project / --exclude on carried days', () =>
   it('applies the project filter underneath a provider filter', async () => {
     await seedCache(carriedDayWithProjects(daysAgoStr(10)))
     await seedLiveTodaySession()
-    const range = monthRange()
+    const range = coveringRange()
 
     // Stated as the delta the filter must produce, so the assertion holds
     // whatever the provider-scoped live parse contributes.
@@ -226,7 +257,7 @@ describe('durable headline honours --project / --exclude on carried days', () =>
   it('keeps the menubar payload in step with the report under a project filter', async () => {
     await seedCache(carriedDayWithProjects(daysAgoStr(10)))
     await seedLiveTodaySession()
-    const range = monthRange()
+    const range = coveringRange()
 
     clearSessionCache()
     const menubar = await buildMenubarPayloadForRange({ range, label: 'p' }, { provider: 'all', exclude: ['drop-me'], optimize: false, timeline: false })
@@ -243,7 +274,7 @@ describe('durable headline honours --project / --exclude on carried days', () =>
   it('leaves the unfiltered headline exactly as it was', async () => {
     await seedCache(carriedDayWithProjects(daysAgoStr(10)))
     await seedLiveTodaySession()
-    const range = monthRange()
+    const range = coveringRange()
 
     const live = await liveOnly(range, [], [])
     clearSessionCache()
@@ -259,7 +290,7 @@ describe('carried days with no per-project split (pre-v15)', () => {
   it('sets the unfilterable day aside instead of leaking it into a filtered headline', async () => {
     await seedCache(carriedDayWithoutProjects(daysAgoStr(10)))
     await seedLiveTodaySession()
-    const range = monthRange()
+    const range = coveringRange()
 
     const live = await liveOnly(range, [], ['drop-me'])
     clearSessionCache()
@@ -279,7 +310,7 @@ describe('carried days with no per-project split (pre-v15)', () => {
     delete day.providers['claude']!.projects
     await seedCache(day)
     await seedLiveTodaySession()
-    const range = monthRange()
+    const range = coveringRange()
 
     clearSessionCache()
     const durable = await buildDurablePeriod({ range, label: 'p' }, { provider: 'claude', exclude: ['drop-me'] })
@@ -291,7 +322,7 @@ describe('carried days with no per-project split (pre-v15)', () => {
   it('says so in the overview instead of just showing a short total', async () => {
     await seedCache(carriedDayWithoutProjects(daysAgoStr(10)))
     await seedLiveTodaySession()
-    const range = monthRange()
+    const range = coveringRange()
 
     clearSessionCache()
     const durable = await buildDurablePeriod({ range, label: 'This month' }, { provider: 'all', exclude: ['drop-me'] })
@@ -320,7 +351,7 @@ describe('carried days with no per-project split (pre-v15)', () => {
   it('still counts the day in full when no project filter is active', async () => {
     await seedCache(carriedDayWithoutProjects(daysAgoStr(10)))
     await seedLiveTodaySession()
-    const range = monthRange()
+    const range = coveringRange()
 
     const live = await liveOnly(range, [], [])
     clearSessionCache()
