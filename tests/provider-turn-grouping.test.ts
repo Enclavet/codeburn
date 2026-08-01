@@ -98,6 +98,47 @@ describe('provider turn grouping', () => {
     expect(session.categoryBreakdown[turn.category].oneShotTurns).toBe(0)
   })
 
+  it('classifies a range-sliced turn from the whole turn, not the surviving calls (#852)', async () => {
+    const chatsDir = join(home, '.gemini', 'tmp', 'project-b', 'chats')
+    await mkdir(chatsDir, { recursive: true })
+    await writeFile(join(chatsDir, 'session-slice.json'), JSON.stringify({
+      sessionId: 'gemini-slice-1',
+      startTime: '2026-05-16T10:00:00.000Z',
+      messages: [
+        { id: 'u1', timestamp: '2026-05-16T10:00:00.000Z', type: 'user', content: 'read then edit src/parser.ts' },
+        {
+          id: 'g1', timestamp: '2026-05-16T10:00:00.000Z', type: 'gemini', content: 'reading',
+          model: 'gemini-3.1-pro-preview', tokens: { input: 100, output: 30 },
+          toolCalls: [{ id: 't1', name: 'read_file', args: { path: 'src/parser.ts' } }],
+        },
+        {
+          id: 'g2', timestamp: '2026-05-16T11:00:00.000Z', type: 'gemini', content: 'editing',
+          model: 'gemini-3.1-pro-preview', tokens: { input: 90, output: 25 },
+          toolCalls: [{ id: 't2', name: 'edit_file', args: { path: 'src/parser.ts' } }],
+        },
+      ],
+    }))
+
+    const parseAllSessions = await loadParser()
+    // A range that keeps the 10:00 Read call but excludes the 11:00 Edit call,
+    // so the turn is sliced. `turnSlicedToRange`/`callsInRange` compare absolute
+    // times, so this is timezone-independent.
+    const sliceRange: DateRange = {
+      start: new Date('2026-05-16T10:00:00.000Z'),
+      end: new Date('2026-05-16T10:30:00.000Z'),
+    }
+    const projects = await parseAllSessions(sliceRange, 'gemini')
+    const turn = projects[0]!.sessions[0]!.turns[0]!
+
+    // Cost/calls are sliced to the range: only the Read call survives.
+    expect(turn.assistantCalls.map(c => c.deduplicationKey)).toEqual(['gemini:gemini-slice-1:g1'])
+    // But category/hasEdits are whole-turn judgments — the Edit is part of the
+    // exchange — so they stay classified from the FULL turn, matching the Claude
+    // path rather than being re-derived from the partial slice (which alone reads
+    // as a no-edit exploration turn).
+    expect(turn.hasEdits).toBe(true)
+  })
+
   it('groups Mistral Vibe assistant messages and uses Vibe session_cost when present', async () => {
     const sessionDir = join(vibeHome, 'logs', 'session', 'session_20260516_100000_vibe')
     await mkdir(sessionDir, { recursive: true })

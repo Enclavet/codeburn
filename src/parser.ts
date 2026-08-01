@@ -3054,7 +3054,15 @@ async function parseProviderSources(
         slicedTurn = sliced
       }
 
-      const classified = cachedTurnToClassified(slicedTurn)
+      // Classify the FULL turn, then keep only the in-range calls: category /
+      // hasEdits / retries are whole-exchange judgments, not per-call sums, so a
+      // midnight-straddling turn is classified identically to the Claude path
+      // (scanProjectDirs) rather than being re-derived from a partial slice.
+      // Cost/calls come from the retained calls, unchanged.
+      const classifiedFull = cachedTurnToClassified(turn)
+      const classified = dateRange
+        ? (classifiedTurnSlicedToRange(classifiedFull, dateRange) ?? classifiedFull)
+        : classifiedFull
       const project = slicedTurn.calls[0]?.project ?? source.project
       const key = `${providerName}:${turn.sessionId}:${project}`
 
@@ -3103,7 +3111,13 @@ async function parseProviderSources(
           slicedTurn = sliced
         }
 
-        const classified = cachedTurnToClassified(slicedTurn)
+        // Classify the FULL turn, then keep only the in-range calls (same rule
+        // as the loop above and the Claude path): whole-exchange judgments stay
+        // whole-turn; cost/calls come from the retained calls.
+        const classifiedFull = cachedTurnToClassified(turn)
+        const classified = dateRange
+          ? (classifiedTurnSlicedToRange(classifiedFull, dateRange) ?? classifiedFull)
+          : classifiedFull
         const project = slicedTurn.calls[0]?.project ?? providerName
         const key = `${providerName}:${turn.sessionId}:${project}`
 
