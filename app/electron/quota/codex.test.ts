@@ -180,6 +180,9 @@ describe('Codex quota', () => {
     expect(inCredits.footerLines).toEqual(['Credits remaining · 3,410'])
     const inDollars = decodeCodexUsage({ credits: { has_credits: false, balance: 3.5 } })
     expect(inDollars.footerLines).toEqual(['Credits remaining · $3.50'])
+    // Thousands separators must match the menubar's en_US currency formatter.
+    const inDollarsLarge = decodeCodexUsage({ credits: { has_credits: false, balance: 12500 } })
+    expect(inDollarsLarge.footerLines).toEqual(['Credits remaining · $12,500.00'])
   })
 
   it('returns disconnected without credentials', async () => {

@@ -227,7 +227,7 @@ export function decodeCodexUsage(body: unknown): QuotaProvider {
   const hasCredits = data.credits?.has_credits === true
   const footerLines: string[] = []
   if (balance !== null && balance > 0) {
-    footerLines.push(`Credits remaining · ${hasCredits ? Math.round(balance).toLocaleString('en-US') : `$${balance.toFixed(2)}`}`)
+    footerLines.push(`Credits remaining · ${hasCredits ? Math.round(balance).toLocaleString('en-US') : balance.toLocaleString('en-US', { style: 'currency', currency: 'USD' })}`)
   }
   // Uncapped on purpose, so a bar-less card does not read as a failed fetch.
   if (!credits && data.credits?.unlimited === true) footerLines.push('Credits · Unlimited')

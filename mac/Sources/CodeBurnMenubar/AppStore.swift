@@ -1397,6 +1397,9 @@ final class AppStore {
             let formatter = NumberFormatter()
             formatter.numberStyle = inCredits ? .decimal : .currency
             formatter.maximumFractionDigits = inCredits ? 0 : 2
+            // Half-up matches the desktop decoder's Math.round; the default is
+            // half-even, which disagrees on exact-half balances.
+            formatter.roundingMode = .halfUp
             // `en_US`, not `en_US_POSIX`: the latter drops grouping entirely.
             formatter.locale = Locale(identifier: "en_US")
             if !inCredits { formatter.currencyCode = "USD" }

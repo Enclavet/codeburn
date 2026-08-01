@@ -56,6 +56,12 @@ struct CodexQuotaSummaryTests {
         #expect(store.quotaSummary(for: .codex)?.footerLines == ["Credits remaining · $3,410.40"])
     }
 
+    @Test("an exact-half credit balance rounds up, matching the desktop decoder")
+    func creditBalanceRoundsHalfUp() {
+        let store = store(usage(balance: 3410.5, hasCredits: true))
+        #expect(store.quotaSummary(for: .codex)?.footerLines == ["Credits remaining · 3,411"])
+    }
+
     @Test("an uncapped credit account says so instead of showing nothing")
     func uncappedAccountSaysUnlimited() {
         let store = store(usage(hasCredits: true, unlimited: true))
