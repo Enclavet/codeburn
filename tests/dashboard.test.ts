@@ -2,7 +2,7 @@ import { homedir } from 'os'
 
 import { describe, it, expect } from 'vitest'
 
-import { getDailyActivityRows, getDashboardScanRange, pageHistoryCursor, scrollHistoryCursor, selectDashboardPeriodProjects, shortProject, showEmptyState } from '../src/dashboard.js'
+import { getDailyActivityRows, getDashboardScanRange, getLayout, pageHistoryCursor, scrollHistoryCursor, selectDashboardPeriodProjects, shortProject, showEmptyState } from '../src/dashboard.js'
 import { getDateRange } from '../src/cli-date.js'
 import { formatCost } from '../src/format.js'
 import type { ProjectSummary, SessionSummary } from '../src/types.js'
@@ -246,5 +246,27 @@ describe('showEmptyState', () => {
   it('non-scrollable mode (custom range, day view) keeps the original behavior', () => {
     expect(showEmptyState(0, false, 0, false)).toBe(true)
     expect(showEmptyState(2, false, 0, false)).toBe(false)
+  })
+})
+
+describe('getLayout - dashboard width breakpoints', () => {
+  it('uses a single column at 89 columns or below', () => {
+    expect(getLayout(89)).toMatchObject({ dashWidth: 89, wide: false, halfWidth: 89 })
+  })
+
+  it('switches to two columns at 90 columns', () => {
+    expect(getLayout(90)).toMatchObject({ dashWidth: 90, wide: true, halfWidth: 45 })
+  })
+
+  it('keeps two columns at 120 columns but the By-Model panel is too narrow for Tok/s', () => {
+    // Inner panel width is halfWidth - PANEL_CHROME (4). At 120 cols halfWidth=60,
+    // inner=56, below the 61-col threshold where Tok/s renders.
+    expect(getLayout(120)).toMatchObject({ dashWidth: 120, wide: true, halfWidth: 60 })
+    expect(getLayout(120).halfWidth - 4).toBeLessThan(61)
+  })
+
+  it('keeps two columns and has enough room for Tok/s at 130 columns', () => {
+    expect(getLayout(130)).toMatchObject({ dashWidth: 130, wide: true, halfWidth: 65 })
+    expect(getLayout(130).halfWidth - 4).toBeGreaterThanOrEqual(61)
   })
 })
