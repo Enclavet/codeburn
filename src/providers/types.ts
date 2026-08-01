@@ -53,6 +53,9 @@ export type ParsedProviderCall = {
   // Exact provider-recorded cwd, kept separately because projectPath may later
   // canonicalize a linked worktree to its main repository.
   workingDirectory?: string
+  activeDurationMs?: number
+  activeGeneratedTokens?: number
+  toolWaitMs?: number
 }
 
 // A directory or database file that a provider's discoverSessions() scans.
