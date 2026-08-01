@@ -1,5 +1,5 @@
 <p align="center">
-  <a href="https://claude.com/open-source-max"><img src="https://img.shields.io/badge/Claude_for_Open_Source-Recipient-da7756?style=for-the-badge&labelColor=1a1a1a" alt="Claude for Open Source Recipient" /></a>
+  <a href="https://claude.com/open-source-max"><img src="https://raw.githubusercontent.com/getagentseal/codeburn/main/assets/open-source-recipient.png" alt="Codex and Claude for Open Source Recipient" width="720" /></a>
 </p>
 
 <p align="center">
