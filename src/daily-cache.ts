@@ -265,7 +265,13 @@ function sanitizeProjects(raw: unknown): { projects?: DailyEntry['projects'] } {
   if (!isRecord(raw)) return {}
   const out: NonNullable<DailyEntry['projects']> = {}
   for (const [name, p] of Object.entries(raw)) {
-    if (name in Object.prototype || !isRecord(p)) continue
+    // A project key is a directory basename, so it can legitimately be a
+    // prototype-member name ("constructor", "valueOf", ...). `setOwn` writes it
+    // as an own property via defineProperty, so keeping it is pollution-safe —
+    // and dropping it would silently subtract that project's cost from a
+    // --project/--exclude total (the day's split would no longer sum to its own
+    // cost, which the filtered headline relies on).
+    if (!isRecord(p)) continue
     setOwn(out, name, {
       cost: num(p.cost),
       calls: num(p.calls),

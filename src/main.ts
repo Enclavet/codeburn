@@ -992,6 +992,7 @@ program
         cacheWriteTokens: durable.data.cacheWriteTokens,
         days: durable.days,
         carriedCostUSD: durable.carriedCostUSD,
+        unattributedCostUSD: durable.unattributedCostUSD,
       },
     }))
   })
