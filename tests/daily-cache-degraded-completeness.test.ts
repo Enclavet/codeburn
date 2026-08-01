@@ -143,6 +143,26 @@ describe('daily cache: a complete cache that outruns its own data is not trusted
     expectPreserved(out)
   })
 
+  it('trusts a stamped watermark over an idle tail — no re-derive treadmill', async () => {
+    // Same shape as the corrupt case above (watermark past the newest populated
+    // day), but stamped by a COMPLETE parse: the recent days are genuinely
+    // empty, not a frozen hole. A degraded parse can no longer produce this
+    // state, so the stamp means the watermark is trustworthy and re-deriving the
+    // empty tail on every launch (the perf regression) must not happen.
+    await seed({ lastComputedDate: daysAgoStr(1), watermarkTrusted: true })
+    let parses = 0
+    const out = await ensureCacheHydrated(
+      async () => { parses += 1; return [] },
+      () => [],
+      'cfg-A',
+      () => true,
+    )
+    expect(parses).toBe(0)
+    expect(out.lastComputedDate).toBe(daysAgoStr(1))
+    expect(out.complete).toBe(true)
+    expectPreserved(out)
+  })
+
   it('a degraded re-derivation of those days still keeps every carried day', async () => {
     await seed({ lastComputedDate: daysAgoStr(1) })
     const out = await ensureCacheHydrated(noSessions, () => [], 'cfg-A', () => false)
