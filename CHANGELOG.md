@@ -2,12 +2,16 @@
 
 ## Unreleased
 
+### Added
+- **Credit-metered ChatGPT workspaces (Business / Edu / Enterprise) now show their limit.** These plans report no rate-limit windows, so the admin-set monthly allowance from `spend_control.individual_limit` is shown as a "Monthly usage limit" bar in the desktop app and the menubar.
+
 ### Added (CLI)
 - **Codex throughput tracking**: per-model Tok/s in the dashboard and report, active time excludes tool wait. (#805, thanks @ihearttokyo)
 
 ### Fixed (CLI)
 - **`--project` / `--exclude` now apply to the headline totals, not just the detail panels.** The durable headline unions the carry-forward daily cache with today's live parse, and the cached days were sliced to the requested provider but never to the requested project — so the Overview panel counted excluded projects while By Project / By Activity / By Model (built from the name-filtered parse) left them out, and the two could not be reconciled. Cost, calls, sessions and savings are now sliced out of the per-project day stats the cache has carried since v15. Tokens, models and categories have no per-project split in the cache, so under a project filter they come from the (project-filtered) live parse instead; cached days — or provider slices — carried from before v15 have no project split at all, so they cannot be attributed to a filtered project, and the terminal overview now states how much was set aside rather than folding it into the total. (#864)
 - **Codex parser corrections**: fork-replay no longer double-counts `patch_apply_end` and `mcp_tool_call_end`; `exec` is normalized to Bash; `custom_tool_call` events are handled; token_count lines larger than 32 KiB now parse exact token counts instead of estimating. Codex session cache bumps from v7 to v8 for a one-time re-parse. Only tool attribution changes for ordinary sessions, leaving their cost identical; sessions that logged an oversized token_count line are repriced from exact counts instead of an estimate. (#805)
+
 ### Fixed
 - Claude Desktop and Cowork sessions are discovered for Windows Microsoft Store (MSIX) installs. (#611)
 
