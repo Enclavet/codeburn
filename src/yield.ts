@@ -146,6 +146,24 @@ function getMainBranch(cwd: string): string {
  * and a trailing `.git` / `/` is removed. Local paths and `file://` remotes
  * return null — a repo with no network remote has no server-side identity.
  */
+/** Max length of an emitted repo identity (`host/org/repo`). */
+const MAX_REPO_IDENTITY_LENGTH = 200
+
+/**
+ * Positive validation (allow-list) of a composed repo identity — the final
+ * gate EVERY branch passes through before anything is returned. The host must
+ * look like a hostname and every path segment like a repo path segment, so no
+ * upstream parsing quirk (transport-helper remotes like `ext::…` or
+ * `codecommit::…`, credentials that survived a malformed URL, oversized
+ * strings) can reach the wire. Rejecting is always safe: an unrecognizable
+ * remote simply has no server-side identity.
+ */
+function isValidRepoIdentity(host: string, segments: string[]): boolean {
+  if (!/^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$/.test(host)) return false
+  if (segments.length === 0) return false
+  return segments.every(s => /^[A-Za-z0-9._~-]+$/.test(s))
+}
+
 export function normalizeRemoteUrl(url: string): string | null {
   const trimmed = url.trim()
   if (!trimmed) return null
@@ -159,12 +177,6 @@ export function normalizeRemoteUrl(url: string): string | null {
   let host: string
   let path: string
 
-  // scp-like syntax: [user@]host:path. Host must be at least 2 chars — a
-  // single-character "host" is a Windows drive-relative path (`C:repo`),
-  // never a real remote host. `@` is excluded from the host class so a
-  // rejected single-char host can't backtrack into `user@C` matching as
-  // host "user@C".
-  const scpLike = /^(?:[^@/]+@)?([^:/\\@]{2,}):(?!\/\/)(.+)$/.exec(trimmed)
   if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(trimmed)) {
     let parsed: URL
     try {
@@ -176,22 +188,34 @@ export function normalizeRemoteUrl(url: string): string | null {
     if (!parsed.hostname) return null
     host = parsed.hostname
     path = parsed.pathname
-  } else if (scpLike) {
-    // scp-like syntax: [user@]host:path — not parseable by URL
+  } else {
+    // scp-like syntax: [user@]host:path. Credentials (userinfo) are split off
+    // at the FIRST `@` BEFORE any host matching — expressing userinfo as an
+    // optional regex group lets backtracking abandon the group and re-parse a
+    // credential prefix as `host:path`, dumping the token into the path
+    // (e.g. `x-access-token:ghp_…@github.com/org/repo`). Host must be at
+    // least 2 chars: a single-character "host" is a Windows drive-relative
+    // path (`C:repo`), never a real remote host.
+    const at = trimmed.indexOf('@')
+    const rest = at >= 0 ? trimmed.slice(at + 1) : trimmed
+    const scpLike = /^([^:/\\]{2,}):(?!\/\/)(.+)$/.exec(rest)
+    if (!scpLike) return null
     host = scpLike[1]
     path = scpLike[2]
-  } else {
-    // Bare local path (or something unrecognizable) — no remote identity.
-    return null
   }
 
   const cleanPath = path
+    .replace(/\/+/g, '/')      // collapse doubled slashes → one join key, not two
     .replace(/^\/+/, '')
     .replace(/\/+$/, '')
-    .replace(/\.git$/, '')
+    .replace(/\.git$/i, '')    // case-insensitive: Repo.GIT joins with repo.git
   if (!cleanPath) return null
 
-  return `${host.toLowerCase()}/${cleanPath}`
+  const identity = `${host.toLowerCase()}/${cleanPath}`
+  if (identity.length > MAX_REPO_IDENTITY_LENGTH) return null
+  if (!isValidRepoIdentity(host.toLowerCase(), cleanPath.split('/'))) return null
+
+  return identity
 }
 
 /** `git remote get-url origin`, normalized. Null when absent or local-only. */
@@ -569,21 +593,6 @@ export type SessionAttributionRecord = {
   lastTimestamp: string
 }
 
-/**
- * Compute per-session attribution records for sync. Reuses the exact yield
- * repo grouping + tightest-window commit attribution (`methodology:
- * timestamp-window`), then joins in each repo group's normalized origin
- * remote and the session's PR links.
- *
- * Inclusion rules:
- * - Sessions with neither attributed commits nor PR links are omitted.
- * - Commits are only included when the repo has a normalized remote; a SHA
- *   without a repo identity has no server-side meaning. Such sessions still
- *   emit a record when they carry PR links (the PR URL embeds the repo).
- *
- * Takes already-parsed projects (sync push has them in hand) instead of
- * re-parsing like computeYield does.
- */
 /** Max PR links retained per session attribution record. */
 export const MAX_PR_LINKS_PER_SESSION = 20
 
@@ -592,11 +601,16 @@ export const MAX_PR_LINKS_PER_SESSION = 20
  * verify truthiness, so arbitrary strings can land in `session.prLinks`.
  * Keep only https URLs shaped like a PR (`/org/repo/pull/N` — GitHub and
  * GitHub Enterprise), bounded in length, capped per session, sorted.
+ *
+ * Links are REBUILT from `origin + pathname`, never passed through verbatim:
+ * userinfo (`https://alice:token@…`), query strings (copy-pasted GitHub
+ * links routinely carry `?notification_referrer_id=…`), and fragments are
+ * all dropped. Rebuilt links that collapse to the same URL dedupe.
  */
 export function sanitizePrLinks(links: string[]): string[] {
-  const valid: string[] = []
+  const valid = new Set<string>()
   for (const link of links) {
-    if (typeof link !== 'string' || link.length === 0 || link.length > 256) continue
+    if (typeof link !== 'string' || link.length === 0 || link.length > 512) continue
     let url: URL
     try {
       url = new URL(link)
@@ -605,11 +619,34 @@ export function sanitizePrLinks(links: string[]): string[] {
     }
     if (url.protocol !== 'https:') continue
     if (!/^\/[^/]+\/[^/]+\/pull\/\d+$/.test(url.pathname)) continue
-    valid.push(link)
+    const rebuilt = `${url.origin}${url.pathname}`
+    if (rebuilt.length > 256) continue
+    valid.add(rebuilt)
   }
-  return valid.sort().slice(0, MAX_PR_LINKS_PER_SESSION)
+  return [...valid].sort().slice(0, MAX_PR_LINKS_PER_SESSION)
 }
 
+/**
+ * Compute per-session attribution records for sync. Reuses the exact yield
+ * repo grouping + tightest-window commit attribution (`methodology:
+ * timestamp-window`), then joins in each repo group's normalized origin
+ * remote and the session's sanitized PR links.
+ *
+ * Inclusion rules:
+ * - Only sessions whose OWN project path resolved to a repo participate in
+ *   commit attribution; cwd-fallback sessions never carry a repo or commits
+ *   (privacy gate — see below) but still emit a record when they have PR links.
+ * - Commits require a normalized remote; a SHA without a repo identity has
+ *   no server-side meaning.
+ * - A session with no commits and no PR links is emitted ONLY when it lost a
+ *   commit to a tighter-window session in THIS computation (`lostCandidacy`)
+ *   — a retraction candidate. A session that merely aged its commits out of
+ *   the range lost them to nobody, and emitting an empty record for it would
+ *   permanently retract a still-correct server-side count.
+ *
+ * Takes already-parsed projects (sync push has them in hand) instead of
+ * re-parsing like computeYield does.
+ */
 export function computeAttributionRecords(
   projects: ProjectSummary[],
   range: DateRange,
@@ -636,8 +673,10 @@ export function computeAttributionRecords(
     // Keyed by object reference: session objects are unique per group entry,
     // whereas sessionId strings could collide across projects.
     const attributionBySession = new Map<SessionSummary, CommitInfo[]>()
+    const lostCandidacyBySession = new Map<SessionSummary, boolean>()
     for (const [i, session] of ownSessions.entries()) {
       attributionBySession.set(session, attributions[i]?.commits ?? [])
+      lostCandidacyBySession.set(session, attributions[i]?.lostCandidacy ?? false)
     }
 
     for (const [index, session] of group.sessions.entries()) {
@@ -649,7 +688,17 @@ export function computeAttributionRecords(
         ? (attributionBySession.get(session) ?? [])
         : []
       const prLinks = sanitizePrLinks(session.prLinks ?? [])
-      if (attributedCommits.length === 0 && prLinks.length === 0) continue
+      // Empty sessions are retraction candidates ONLY when they lost a commit
+      // to a tighter-window session in THIS run: that commit's server-side
+      // attribution is migrating, so the loser must re-emit commit_count=0.
+      // An empty session whose commits merely aged out of the --since range
+      // (rolling window, or a narrower window than a previous push) lost them
+      // to NOBODY — emitting a retraction for it would permanently zero a
+      // still-correct server-side count, because the original state key stays
+      // ledgered and is never re-sent.
+      const lostToTighterSession = sessionRemote !== null &&
+        (lostCandidacyBySession.get(session) ?? false)
+      if (attributedCommits.length === 0 && prLinks.length === 0 && !lostToTighterSession) continue
 
       records.push({
         sessionId: session.sessionId,

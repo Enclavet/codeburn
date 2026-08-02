@@ -209,8 +209,24 @@ export function collectUnsentAttribution(records: SessionAttributionRecord[]): {
   allItems: AttributionItem[]
   unsent: AttributionItem[]
 } {
-  const allItems = flattenAttributionRecords(records)
   const sent = ledgerKeySet()
+
+  // Empty records (no commits, no PR links) exist only to RETRACT a session
+  // span whose commits migrated to another session. Send one only when a
+  // PRIOR state for that session was already ledgered — a session that was
+  // never sent has nothing to retract.
+  const sessionsWithPriorState = new Set<string>()
+  for (const key of sent) {
+    if (key.startsWith('attr:s:')) {
+      const sessionId = key.slice('attr:s:'.length, key.lastIndexOf(':'))
+      sessionsWithPriorState.add(sessionId)
+    }
+  }
+  const sendable = records.filter(r =>
+    r.commits.length > 0 || r.prLinks.length > 0 || sessionsWithPriorState.has(r.sessionId),
+  )
+
+  const allItems = flattenAttributionRecords(sendable)
   const unsent = allItems.filter(i => !sent.has(i.dedupKey))
   return { allItems, unsent }
 }

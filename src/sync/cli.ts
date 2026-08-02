@@ -371,6 +371,12 @@ export function registerSyncCommands(program: Command): void {
               process.stderr.write('Auth rejected by server during attribution push. Run `codeburn sync setup` to re-authenticate.\n')
               process.exit(1)
             }
+            if (attrResult.outcome === 'rate-limited') {
+              process.stderr.write(`Rate limited during attribution push — gave up after repeated retries. Remaining facts will be sent on the next push.\n`)
+            }
+            if (attrResult.outcome === 'server-error') {
+              process.stderr.write(`Server error (HTTP ${attrResult.httpStatus}) during attribution push. Remaining facts will be sent on the next push.\n`)
+            }
           } else {
             process.stderr.write(`Skipping attribution push (${attributionUnsent.length} facts) — will retry on next push.\n`)
           }
@@ -382,7 +388,10 @@ export function registerSyncCommands(program: Command): void {
         // Summary
         process.stderr.write(`\nSynced ${result.totalSent} calls ($${result.totalCostSent.toFixed(2)}) to ${config.baseUrl}\n`)
         if (attrResult) {
-          process.stderr.write(`  Attribution: ${attrResult.totalSent} facts synced${attrResult.totalRejected > 0 ? `, ${attrResult.totalRejected} rejected (will retry)` : ''}\n`)
+          const attrSuffix = attrResult.outcome !== 'complete'
+            ? ` (push incomplete — remainder retries next push)`
+            : attrResult.totalRejected > 0 ? `, ${attrResult.totalRejected} rejected (will retry)` : ''
+          process.stderr.write(`  Attribution: ${attrResult.totalSent} facts synced${attrSuffix}\n`)
         }
         if (result.totalRejected > 0) {
           process.stderr.write(`  ${result.totalRejected} spans rejected (will retry on next push)\n`)

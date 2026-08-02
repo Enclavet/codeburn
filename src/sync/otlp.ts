@@ -189,7 +189,22 @@ export function sessionAttributionKey(record: SessionAttributionRecord): string 
   const commitStates = record.commits
     .map(c => `${c.sha}:${c.inMain ? 1 : 0}${c.wasReverted ? 1 : 0}`)
     .sort()
-  return `attr:s:${record.sessionId}:${stateHash([record.repo ?? '', ...record.prLinks, ...commitStates])}`
+  // Project and both window timestamps are part of the state: an ongoing
+  // session whose window grew (or whose project resolution changed) re-emits
+  // with the corrected span times instead of freezing at first send.
+  return `attr:s:${record.sessionId}:${stateHash([
+    record.repo ?? '',
+    record.project,
+    record.firstTimestamp,
+    record.lastTimestamp,
+    ...record.prLinks,
+    ...commitStates,
+  ])}`
+}
+
+/** Ledger-key prefix for a session's attribution facts (any state). */
+export function sessionAttributionKeyPrefix(sessionId: string): string {
+  return `attr:s:${sessionId}:`
 }
 
 /** Flatten attribution records into ledger-able items (one session item + one per commit). */
@@ -234,9 +249,11 @@ export function buildAttributionOtlpPayload(items: AttributionItem[]): OtlpPaylo
 
   const spans: OtlpSpan[] = items.map(item => {
     const startNano = toUnixNano(item.timestamp)
-    const endNano = item.endTimestamp
-      ? toUnixNano(item.endTimestamp)
-      : (BigInt(startNano) + 1_000_000n).toString()
+    // Clamp like the usage builder: end is never 0 (malformed timestamp) and
+    // never earlier than start + 1ms (out-of-order session timestamps).
+    const minEndNano = BigInt(startNano) + 1_000_000n
+    const rawEndNano = item.endTimestamp ? BigInt(toUnixNano(item.endTimestamp)) : 0n
+    const endNano = (rawEndNano > minEndNano ? rawEndNano : minEndNano).toString()
 
     const attributes: OtlpAttribute[] = [
       { key: 'ai.session_id', value: { stringValue: item.sessionId } },

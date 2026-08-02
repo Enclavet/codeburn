@@ -133,6 +133,40 @@ describe('normalizeRemoteUrl', () => {
     expect(normalizeRemoteUrl('gitserver:team/repo.git')).toBe('gitserver/team/repo')
     expect(normalizeRemoteUrl('git@gitbox:org/repo.git')).toBe('gitbox/org/repo')
   })
+
+  it('never leaks credentials via scp-branch backtracking on malformed remotes', () => {
+    // Credential-prefixed remotes: the userinfo split happens BEFORE host
+    // matching, so a token can never be re-parsed as host:path.
+    expect(normalizeRemoteUrl('x-access-token:ghp_LIVETOKEN_abcdefghijklmnop@github.com/acme/private-repo.git')).toBeNull()
+    expect(normalizeRemoteUrl('oauth2:glpat-TOKEN@gitlab.com/org/repo.git')).toBeNull()
+    // One dropped slash: not a URL, must not fall through as host "https"
+    expect(normalizeRemoteUrl('https:/user:ghp_TOKEN@github.com/org/repo.git')).toBeNull()
+    // Multiple @: split at the first, residual @ fails the allow-list
+    expect(normalizeRemoteUrl('a@b@github.com:org/repo.git')).toBeNull()
+    expect(normalizeRemoteUrl('user@host:path@with-at')).toBeNull()
+  })
+
+  it('rejects transport-helper remotes and enforces shape + length on the identity', () => {
+    // git-remote-ext: embeds a local SSH key path
+    expect(normalizeRemoteUrl('ext::ssh -i /Users/me/.ssh/id_ed25519_work git@github.com %S /acme/private.git')).toBeNull()
+    expect(normalizeRemoteUrl('ext::sh -c whatever')).toBeNull()
+    // git-remote-codecommit: embeds an AWS profile name
+    expect(normalizeRemoteUrl('codecommit::us-east-1://MyAwsProfile@MyRepo')).toBeNull()
+    expect(normalizeRemoteUrl('codecommit::us-east-1://MyRepo')).toBeNull()
+    // Length bound
+    expect(normalizeRemoteUrl(`git@github.com:org/${'a'.repeat(300)}.git`)).toBeNull()
+    // Path segments must be repo-shaped (no spaces, colons, @)
+    expect(normalizeRemoteUrl('gitserver:has space/repo.git')).toBeNull()
+    // Legit multi-segment (GitLab subgroup) paths survive the allow-list
+    expect(normalizeRemoteUrl('https://gitlab.example.com/group/sub/repo.git')).toBe('gitlab.example.com/group/sub/repo')
+  })
+
+  it('normalizes .GIT case-insensitively and collapses doubled slashes to one join key', () => {
+    expect(normalizeRemoteUrl('git@github.com:acme/Repo.GIT')).toBe('github.com/acme/Repo')
+    expect(normalizeRemoteUrl('https://github.com/acme/Repo.Git')).toBe('github.com/acme/Repo')
+    expect(normalizeRemoteUrl('https://github.com/acme//repo.git')).toBe('github.com/acme/repo')
+    expect(normalizeRemoteUrl('git@github.com:acme//repo.git')).toBe('github.com/acme/repo')
+  })
 })
 
 // ── computeAttributionRecords ─────────────────────────────────────────
@@ -172,13 +206,16 @@ describe('computeAttributionRecords', () => {
     }
   })
 
-  it('omits sessions with no commits and no PR links', async () => {
+  it('omits empty sessions that lost nothing — commits aged out of range are NOT retracted', async () => {
     const repoDir = await mkdtemp(join(tmpdir(), 'codeburn-attr-empty-'))
     try {
       initRepo(repoDir)
       git(repoDir, ['remote', 'add', 'origin', 'git@github.com:acme/widget.git'])
       await writeFile(join(repoDir, 'file.txt'), 'hello\n')
-      // Commit outside every session window
+      // Commit outside every session window: no session competes for it, so
+      // nobody "lost" it. Even if this session previously synced a commit
+      // (now outside the --since range), emitting an empty record here would
+      // permanently zero a still-correct server-side count.
       commitAt(repoDir, 'feat: unrelated', '2026-01-01T20:00:00Z')
 
       const session = makeSession({ sessionId: 'sess-idle' })
@@ -187,6 +224,44 @@ describe('computeAttributionRecords', () => {
       ]
 
       expect(computeAttributionRecords(projects, range, repoDir)).toEqual([])
+
+      // …and therefore nothing can be sent, even with prior ledger state for
+      // this session (simulating an earlier wider---since push).
+      const { writeLedger } = await import('../src/sync/ledger.js')
+      writeLedger([{ key: 'attr:s:sess-idle:0123456789abcdef', ts: '2026-01-01T10:00:00.000Z' }])
+      const { collectUnsentAttribution } = await import('../src/sync/push.js')
+      expect(collectUnsentAttribution(computeAttributionRecords(projects, range, repoDir)).unsent).toEqual([])
+    } finally {
+      await rm(repoDir, { recursive: true, force: true })
+    }
+  })
+
+  it('emits a retraction candidate for a session that lost its commit to a tighter window', async () => {
+    const repoDir = await mkdtemp(join(tmpdir(), 'codeburn-attr-lost-'))
+    try {
+      initRepo(repoDir)
+      git(repoDir, ['remote', 'add', 'origin', 'git@github.com:acme/widget.git'])
+      await writeFile(join(repoDir, 'file.txt'), 'hello\n')
+      commitAt(repoDir, 'feat: contested', '2026-01-01T10:30:00Z')
+
+      const tight = makeSession({
+        sessionId: 'sess-tight',
+        firstTimestamp: '2026-01-01T10:15:00.000Z',
+        lastTimestamp: '2026-01-01T10:45:00.000Z',
+      })
+      const broadLoser = makeSession({ sessionId: 'sess-broad-loser' })
+      const projects = [
+        { project: 'app', projectPath: repoDir, sessions: [tight, broadLoser] } as ProjectSummary,
+      ]
+
+      const records = computeAttributionRecords(projects, range, repoDir)
+      const loser = records.find(r => r.sessionId === 'sess-broad-loser')!
+      // The loser IS emitted (retraction candidate: lostCandidacy) with zero
+      // commits — the sync layer decides whether a prior state warrants
+      // actually sending it.
+      expect(loser).toBeDefined()
+      expect(loser.commits).toEqual([])
+      expect(loser.repo).toBe('github.com/acme/widget')
     } finally {
       await rm(repoDir, { recursive: true, force: true })
     }
@@ -326,9 +401,13 @@ describe('computeAttributionRecords', () => {
 
       const records = computeAttributionRecords(projects, range, repoDir)
 
-      expect(records).toHaveLength(1)
-      expect(records[0]!.sessionId).toBe('sess-tight')
-      expect(records[0]!.commits).toHaveLength(1)
+      // Both sessions get records (the loser is a retraction candidate),
+      // but the commit is awarded exactly once — to the tighter window.
+      expect(records).toHaveLength(2)
+      const tightRecord = records.find(r => r.sessionId === 'sess-tight')!
+      const broadRecord = records.find(r => r.sessionId === 'sess-broad')!
+      expect(tightRecord.commits).toHaveLength(1)
+      expect(broadRecord.commits).toEqual([])
     } finally {
       await rm(repoDir, { recursive: true, force: true })
     }
@@ -372,6 +451,14 @@ describe('attribution dedup keys', () => {
     expect(sessionAttributionKey(mutated)).not.toBe(sessionAttributionKey(record))
   })
 
+  it('session key changes when the window or project changes (ongoing sessions re-emit)', () => {
+    const base = makeRecord()
+    const grown = makeRecord({ lastTimestamp: '2026-01-01T12:00:00.000Z' })
+    const renamed = makeRecord({ project: 'app-renamed' })
+    expect(sessionAttributionKey(grown)).not.toBe(sessionAttributionKey(base))
+    expect(sessionAttributionKey(renamed)).not.toBe(sessionAttributionKey(base))
+  })
+
   it('flattens one session item plus one item per commit', () => {
     const items = flattenAttributionRecords([makeRecord()])
     expect(items).toHaveLength(2)
@@ -404,9 +491,36 @@ describe('sanitizePrLinks', () => {
     ])
   })
 
-  it('drops oversized strings and caps the count per session', () => {
-    const huge = `https://github.com/acme/widget/pull/1?x=${'a'.repeat(300)}`
+  it('rebuilds links from origin + pathname: userinfo, query, and fragment never survive', () => {
+    expect(sanitizePrLinks([
+      'https://alice:ghp_TOKEN@github.com/acme/widget/pull/5',
+      'https://github.com/acme/widget/pull/7?notification_referrer_id=xyz',
+      'https://github.com/acme/widget/pull/6#pullrequestreview-123',
+    ])).toEqual([
+      'https://github.com/acme/widget/pull/5',
+      'https://github.com/acme/widget/pull/6',
+      'https://github.com/acme/widget/pull/7',
+    ])
+  })
+
+  it('dedupes links that collapse to the same rebuilt URL', () => {
+    expect(sanitizePrLinks([
+      'https://github.com/acme/widget/pull/9',
+      'https://github.com/acme/widget/pull/9?ref=a',
+      'https://github.com/acme/widget/pull/9#comment',
+    ])).toEqual(['https://github.com/acme/widget/pull/9'])
+  })
+
+  it('drops oversized inputs and caps the count per session', () => {
+    // A long referrer query is stripped, so the link survives...
+    const longQuery = `https://github.com/acme/widget/pull/1?x=${'a'.repeat(300)}`
+    expect(sanitizePrLinks([longQuery])).toEqual(['https://github.com/acme/widget/pull/1'])
+    // ...but pathological inputs beyond the input bound are dropped outright
+    const huge = `https://github.com/acme/widget/pull/1?x=${'a'.repeat(600)}`
     expect(sanitizePrLinks([huge])).toEqual([])
+    // And a rebuilt link that is itself oversized is dropped
+    const longPath = `https://github.com/${'o'.repeat(150)}/${'r'.repeat(80)}/pull/1`
+    expect(sanitizePrLinks([longPath])).toEqual([])
 
     const many = Array.from({ length: 30 }, (_, i) => `https://github.com/acme/widget/pull/${i + 1}`)
     expect(sanitizePrLinks(many)).toHaveLength(MAX_PR_LINKS_PER_SESSION)
@@ -471,6 +585,22 @@ describe('buildAttributionOtlpPayload', () => {
   it('batches items by maxBatchSize', () => {
     const items = flattenAttributionRecords([makeRecord(), makeRecord({ sessionId: 'sess-2' })])
     expect(batchAttributionItems(items, 3).map(b => b.length)).toEqual([3, 1])
+  })
+
+  it('clamps span end time: never 0, never earlier than start + 1ms', () => {
+    // Session window ends BEFORE it starts (out-of-order provider timestamps)
+    const outOfOrder = flattenAttributionRecords([makeRecord({
+      firstTimestamp: '2026-01-01T11:00:00.000Z',
+      lastTimestamp: '2026-01-01T10:00:00.000Z',
+    })])
+    const span1 = buildAttributionOtlpPayload(outOfOrder).resourceSpans[0]!.scopeSpans[0]!.spans[0]!
+    expect(BigInt(span1.endTimeUnixNano)).toBe(BigInt(span1.startTimeUnixNano) + 1_000_000n)
+
+    // Malformed end timestamp (toUnixNano -> 0)
+    const malformed = flattenAttributionRecords([makeRecord({ lastTimestamp: 'not-a-date' })])
+    const span2 = buildAttributionOtlpPayload(malformed).resourceSpans[0]!.scopeSpans[0]!.spans[0]!
+    expect(span2.endTimeUnixNano).not.toBe('0')
+    expect(BigInt(span2.endTimeUnixNano)).toBe(BigInt(span2.startTimeUnixNano) + 1_000_000n)
   })
 })
 
@@ -561,6 +691,42 @@ describe('sendAttributionBatches + collectUnsentAttribution', () => {
       })
       const after = collectUnsentAttribution([mutated])
       expect(after.unsent.map(i => i.kind).sort()).toEqual(['commit', 'session'])
+    } finally {
+      mock.server.close()
+    }
+  })
+
+  it('retracts a session span when its commit migrates to a tighter-window session', async () => {
+    const { sendAttributionBatches, collectUnsentAttribution } = await import('../src/sync/push.js')
+
+    const sha = 'b'.repeat(40)
+    const commit = { sha, timestamp: '2026-01-01T10:30:00.000Z', inMain: true, wasReverted: false }
+
+    // Push 1: session A (broad window) owns the commit
+    const push1 = collectUnsentAttribution([makeRecord({ sessionId: 'sess-A', prLinks: [], commits: [commit] })])
+    expect(push1.unsent).toHaveLength(2)
+    const mock = await startMockOtlp([{ status: 200 }])
+    try {
+      await sendAttributionBatches({ endpoint: mock.url, accessToken: 't', batches: [push1.unsent] })
+
+      // Push 2: a later-parsed tighter session B now wins the commit; A is empty
+      const push2 = collectUnsentAttribution([
+        makeRecord({ sessionId: 'sess-A', prLinks: [], commits: [] }),          // loser: retraction candidate
+        makeRecord({ sessionId: 'sess-B', prLinks: [], commits: [commit] }),    // winner
+      ])
+
+      // A re-emits with commit_count 0 (retraction), B emits session + commit
+      const kinds = push2.unsent.map(i => `${i.sessionId}:${i.kind}`).sort()
+      expect(kinds).toEqual(['sess-A:session', 'sess-B:commit', 'sess-B:session'])
+      const retraction = push2.unsent.find(i => i.sessionId === 'sess-A')!
+      expect(retraction.commitCount).toBe(0)
+      expect(retraction.dedupKey).not.toBe(push1.unsent.find(i => i.kind === 'session')!.dedupKey)
+
+      // A session that was NEVER sent stays excluded when empty
+      const neverSent = collectUnsentAttribution([
+        makeRecord({ sessionId: 'sess-never', prLinks: [], commits: [] }),
+      ])
+      expect(neverSent.unsent).toEqual([])
     } finally {
       mock.server.close()
     }
